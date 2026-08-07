@@ -72,3 +72,24 @@ func GetFirewallStatus() bool {
 	// If the array has at least one item, a firewall is registered and active
 	return len(dst) > 0
 }
+
+// Win32_BIOS maps to the BIOS class which holds the hardware serial number
+type Win32_BIOS struct {
+	SerialNumber string
+}
+
+// GetSerialNumber queries WMI for the device's actual hardware serial number
+func GetSerialNumber() string {
+	var dst []Win32_BIOS
+	
+	// Constructs: SELECT SerialNumber FROM Win32_BIOS
+	query := wmi.CreateQuery(&dst, "")
+	err := wmi.Query(query, &dst)
+	
+	if err != nil || len(dst) == 0 {
+		log.Printf("Error querying Serial Number: %v", err)
+		return "Unknown-Serial"
+	}
+	
+	return dst[0].SerialNumber
+}

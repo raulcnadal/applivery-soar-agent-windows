@@ -42,7 +42,7 @@ func main() {
 	// 3. Construct the JSON payload
 	payload := DeviceData{
 		Platform:     "windows",
-		SerialNumber: "PF3ABCDE", // Note: We are hardcoding this for now, but we should fetch it via WMI (Win32_BIOS) later!
+		SerialNumber: GetSerialNumber(),
 		Attributes:   attributes,
 	}
 
