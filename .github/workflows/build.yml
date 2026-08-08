@@ -1,4 +1,4 @@
-name: Build Windows Agent & MSI
+name: Build Agent MSIs
 
 on:
   push:
@@ -7,52 +7,72 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build:
-    name: Build MSI for ${{ matrix.goarch }}
-    # We are back on Linux, which builds significantly faster!
-    runs-on: ubuntu-latest 
-    
-    strategy:
-      matrix:
-        include:
-          - goarch: amd64
-            wixarch: x64
-          - goarch: arm64
-            wixarch: aarch64
+  # ------------------------------------------------------------------
+  # JOB 1: Fast x64 MSI build on Linux using wixl
+  # ------------------------------------------------------------------
+  build-x64:
+    name: Build x64 MSI (Linux / wixl)
+    runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v5
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: Setup Go
-      uses: actions/setup-go@v6
-      with:
-        go-version: '1.26.x'
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
 
-    - name: Install wixl (Linux MSI Compiler)
-      # Mirroring the logic from your Dockerfile to install the msitools suite
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y wixl msitools
+      - name: Install wixl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wixl msitools
 
-    - name: Install Go Dependencies
-      run: go mod download
+      - name: Build Go x64 Executable
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Agent.exe .
 
-    - name: Build Go Executable
-      env:
-        GOOS: windows
-        GOARCH: ${{ matrix.goarch }}
-      run: |
-        go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Agent.exe .
+      - name: Compile x64 MSI
+        run: wixl -a x64 -o Applivery-SOAR-Agent-amd64.msi agent.wxs
 
-    - name: Compile MSI via wixl
-      # Mirroring the subprocess command from your main.py
-      run: |
-        wixl -a ${{ matrix.wixarch }} -o Applivery-SOAR-Agent-${{ matrix.goarch }}.msi agent.wxs
+      - name: Upload x64 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Applivery-SOAR-Agent-amd64
+          path: Applivery-SOAR-Agent-amd64.msi
 
-    - name: Upload MSI Artifact
-      uses: actions/upload-artifact@v5
-      with:
-        name: Applivery-SOAR-Agent-MSI-${{ matrix.goarch }}
-        path: Applivery-SOAR-Agent-${{ matrix.goarch }}.msi
-        retention-days: 7
+  # ------------------------------------------------------------------
+  # JOB 2: ARM64 MSI build on Windows using WiX v4
+  # ------------------------------------------------------------------
+  build-arm64:
+    name: Build ARM64 MSI (Windows / WiX v4)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+
+      - name: Install WiX Toolset v4
+        run: dotnet tool install --global wix
+
+      - name: Build Go ARM64 Executable
+        env:
+          GOOS: windows
+          GOARCH: arm64
+        run: go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Agent.exe .
+
+      - name: Compile ARM64 MSI
+        run: wix build -arch arm64 -out Applivery-SOAR-Agent-arm64.msi agent.wxs
+
+      - name: Upload ARM64 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Applivery-SOAR-Agent-arm64
+          path: Applivery-SOAR-Agent-arm64.msi
