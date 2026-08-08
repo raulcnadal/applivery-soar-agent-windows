@@ -1,4 +1,4 @@
-name: Build Windows Agent
+name: Build Windows Agent & MSI
 
 on:
   push:
@@ -8,20 +8,22 @@ on:
 
 jobs:
   build:
-    name: Build for ${{ matrix.goarch }}
-    runs-on: ubuntu-latest 
+    name: Build MSI for ${{ matrix.goarch }}
+    runs-on: windows-latest 
     
     strategy:
       matrix:
-        goarch: [amd64, arm64]
+        include:
+          - goarch: amd64
+            wixarch: x64
+          - goarch: arm64
+            wixarch: arm64
 
     steps:
     - name: Checkout Repository
-      # Bumped from v4 to v5
       uses: actions/checkout@v5
 
     - name: Setup Go
-      # Bumped from v5 to v6
       uses: actions/setup-go@v6
       with:
         go-version: '1.26.x'
@@ -29,17 +31,30 @@ jobs:
     - name: Install Dependencies
       run: go mod download
 
-    - name: Build Executable
+    - name: Build Go Executable
       env:
         GOOS: windows
         GOARCH: ${{ matrix.goarch }}
+      # We use PowerShell explicitly on the Windows runner
+      shell: pwsh
       run: |
-        go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Agent-${{ matrix.goarch }}.exe .
+        go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Agent.exe .
 
-    - name: Upload Artifact
-      # Bumped from v4 to v5
+    - name: Compile WiX Installer (candle)
+      shell: pwsh
+      # -arch dynamically sets the MSI architecture based on our matrix
+      # -dPlatform passes the architecture variable into the agent.wxs file
+      run: |
+        & "C:\Program Files (x86)\WiX Toolset v3.11\bin\candle.exe" -arch ${{ matrix.wixarch }} -dPlatform=${{ matrix.wixarch }} agent.wxs -out agent.wixobj
+
+    - name: Link WiX Installer (light)
+      shell: pwsh
+      run: |
+        & "C:\Program Files (x86)\WiX Toolset v3.11\bin\light.exe" -ext WixUIExtension agent.wixobj -out Applivery-SOAR-Agent-${{ matrix.goarch }}.msi
+
+    - name: Upload MSI Artifact
       uses: actions/upload-artifact@v5
       with:
-        name: Applivery-SOAR-Agent-Windows-${{ matrix.goarch }}
-        path: Applivery-SOAR-Agent-${{ matrix.goarch }}.exe
+        name: Applivery-SOAR-Agent-MSI-${{ matrix.goarch }}
+        path: Applivery-SOAR-Agent-${{ matrix.goarch }}.msi
         retention-days: 7
