@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -51,11 +52,34 @@ func main() {
 		log.Fatalf("Error marshaling JSON: %v", err)
 	}
 
-	// 4. POST to https://soar.mi-labs.es/api/device-data/report
-	webhookURL := "https://soar.mi-labs.es/api/device-data/report"
-	req, err := http.NewRequest("POST", webhookURL, bytes.NewBuffer(jsonData))
-	if err != nil {
-		log.Fatalf("Error creating HTTP request: %v", err)
+	// 4. Construct the Endpoint and POST the data
+		// Parse the base URL provided by the registry
+		baseURL, err := url.Parse(config.BaseURL)
+		if err != nil {
+			log.Fatalf("Invalid BaseURL in configuration: %v", err)
+		}
+
+		// Safely append the specific device-data/report endpoint
+		webhookURL := baseURL.JoinPath("/api/device-data/report").String()
+
+		req, err := http.NewRequest("POST", webhookURL, bytes.NewBuffer(jsonData))
+		if err != nil {
+			log.Fatalf("Error creating HTTP request: %v", err)
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Workspace-Slug", config.WorkspaceSlug)
+		req.Header.Set("X-Device-Report-Secret", "db4rLzdlJBo08SArnnH9pHZm")
+
+		// 5. Execute Request
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Fatalf("Failed to send report to webhook at %s: %v", webhookURL, err)
+		}
+		defer resp.Body.Close()
+
+		log.Printf("Successfully sent device data! Server responded with status code: %d", resp.StatusCode)
 	}
 
 	// Append necessary headers
