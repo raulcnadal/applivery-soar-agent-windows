@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   
-  <Package Name="Applivery SOAR Agent" Manufacturer="Applivery" Version="1.0.0.0" UpgradeCode="a138cf96-14fb-4f92-bfe3-0aba460a6275">
+  <Package Name="Applivery SOAR Agent" Manufacturer="Applivery" Version="1.0.0.0" UpgradeCode="a138cf96-14fb-4f92-bfe3-0aba460a6275" InstallScope="perMachine" InstallPrivileges="elevated">
     
     <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     <MediaTemplate EmbedCab="yes" />
@@ -11,6 +11,25 @@
         
         <Component Id="AgentExecutable" Bitness="always64">
           <File Id="AppliverySOARAgentExe" Source="Applivery-SOAR-Agent.exe" KeyPath="yes" />
+          
+          <ServiceInstall
+            Id="ServiceInstaller"
+            Type="ownProcess"
+            Name="AppliverySOARAgent"
+            DisplayName="Applivery SOAR Agent"
+            Description="Reports device telemetry (BitLocker, Firewall, Apps) to the Applivery SOAR platform."
+            Start="auto"
+            Account="LocalSystem"
+            ErrorControl="normal" />
+
+          <ServiceControl
+            Id="StartService"
+            Start="install"
+            Stop="both"
+            Remove="uninstall"
+            Name="AppliverySOARAgent"
+            Wait="yes" />
+            
         </Component>
         
       </Directory>
