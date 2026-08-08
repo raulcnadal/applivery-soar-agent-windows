@@ -60,7 +60,7 @@ jobs:
           go-version: '1.22.x'
 
       - name: Install WiX Toolset v4
-        run: dotnet tool install --global wix
+        run: dotnet tool install --global wix --version "4.*"
 
       - name: Build Go ARM64 Executable
         env:
