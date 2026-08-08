@@ -9,7 +9,8 @@ on:
 jobs:
   build:
     name: Build MSI for ${{ matrix.goarch }}
-    runs-on: windows-latest 
+    # We are back on Linux, which builds significantly faster!
+    runs-on: ubuntu-latest 
     
     strategy:
       matrix:
@@ -17,7 +18,7 @@ jobs:
           - goarch: amd64
             wixarch: x64
           - goarch: arm64
-            wixarch: arm64
+            wixarch: aarch64
 
     steps:
     - name: Checkout Repository
@@ -28,29 +29,26 @@ jobs:
       with:
         go-version: '1.26.x'
 
-    - name: Install Dependencies
+    - name: Install wixl (Linux MSI Compiler)
+      # Mirroring the logic from your Dockerfile to install the msitools suite
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wixl msitools
+
+    - name: Install Go Dependencies
       run: go mod download
 
     - name: Build Go Executable
       env:
         GOOS: windows
         GOARCH: ${{ matrix.goarch }}
-      # We use PowerShell explicitly on the Windows runner
-      shell: pwsh
       run: |
         go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Agent.exe .
 
-    - name: Compile WiX Installer (candle)
-      shell: pwsh
-      # -arch dynamically sets the MSI architecture based on our matrix
-      # -dPlatform passes the architecture variable into the agent.wxs file
+    - name: Compile MSI via wixl
+      # Mirroring the subprocess command from your main.py
       run: |
-        & "C:\Program Files (x86)\WiX Toolset v3.11\bin\candle.exe" -arch ${{ matrix.wixarch }} -dPlatform=${{ matrix.wixarch }} agent.wxs -out agent.wixobj
-
-    - name: Link WiX Installer (light)
-      shell: pwsh
-      run: |
-        & "C:\Program Files (x86)\WiX Toolset v3.11\bin\light.exe" -ext WixUIExtension agent.wixobj -out Applivery-SOAR-Agent-${{ matrix.goarch }}.msi
+        wixl -a ${{ matrix.wixarch }} -o Applivery-SOAR-Agent-${{ matrix.goarch }}.msi agent.wxs
 
     - name: Upload MSI Artifact
       uses: actions/upload-artifact@v5

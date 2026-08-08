@@ -2,11 +2,11 @@
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
     <Product Id="*" Name="Applivery SOAR Agent" Language="1033" Version="1.0.0.0" Manufacturer="Applivery" UpgradeCode="B54A32D1-5C6D-4E90-8A7B-91C732F5D1A2">
         
-        <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" Platform="$(var.Platform)" />
+        <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" />
         <MajorUpgrade DowngradeErrorMessage="A newer version of Applivery SOAR Agent is already installed." />
-        <MediaTemplate EmbedCab="yes" />
+        <Media Id="1" Cabinet="app.cab" EmbedCab="yes" />
 
-        <Feature Id="ProductFeature" Title="Applivery Agent" Level="1">
+        <Feature Id="MainFeature" Level="1">
             <ComponentGroupRef Id="ProductComponents" />
         </Feature>
     </Product>
@@ -21,7 +21,7 @@
 
     <Fragment>
         <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
-            <Component Id="AgentExecutable" Guid="*" Win64="yes">
+            <Component Id="AgentExecutable" Guid="3E4B71D2-A6C5-4F8A-92B1-4A2D8E5F61C9" Win64="yes">
                 <File Id="AgentExe" Source="Applivery-SOAR-Agent.exe" KeyPath="yes" />
             </Component>
         </ComponentGroup>
