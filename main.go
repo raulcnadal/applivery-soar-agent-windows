@@ -32,18 +32,18 @@ func main() {
 	if config.ReportBitLocker {
 		attributes["BitLockerStatus"] = GetBitLockerStatus()
 	}
-	
+
 	if config.ReportFirewall {
 		attributes["FirewallEnabled"] = GetFirewallStatus()
 	}
-	
+
 	// We will always report OS Build for this example
 	attributes["OsBuild"] = GetOSBuild()
 
 	// 3. Construct the JSON payload
 	payload := DeviceData{
 		Platform:     "windows",
-		SerialNumber: GetSerialNumber(),
+		SerialNumber: GetSerialNumber(), // Fetched dynamically via WMI
 		Attributes:   attributes,
 	}
 
@@ -53,48 +53,30 @@ func main() {
 	}
 
 	// 4. Construct the Endpoint and POST the data
-		// Parse the base URL provided by the registry
-		baseURL, err := url.Parse(config.BaseURL)
-		if err != nil {
-			log.Fatalf("Invalid BaseURL in configuration: %v", err)
-		}
-
-		// Safely append the specific device-data/report endpoint
-		webhookURL := baseURL.JoinPath("/api/device-data/report").String()
-
-		req, err := http.NewRequest("POST", webhookURL, bytes.NewBuffer(jsonData))
-		if err != nil {
-			log.Fatalf("Error creating HTTP request: %v", err)
-		}
-
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Workspace-Slug", config.WorkspaceSlug)
-		req.Header.Set("X-Device-Report-Secret", "db4rLzdlJBo08SArnnH9pHZm")
-
-		// 5. Execute Request
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Fatalf("Failed to send report to webhook at %s: %v", webhookURL, err)
-		}
-		defer resp.Body.Close()
-
-		log.Printf("Successfully sent device data! Server responded with status code: %d", resp.StatusCode)
+	// Parse the base URL provided by the registry
+	baseURL, err := url.Parse(config.BaseURL)
+	if err != nil {
+		log.Fatalf("Invalid BaseURL in configuration: %v", err)
 	}
 
-	// Append necessary headers
+	// Safely append the specific device-data/report endpoint
+	webhookURL := baseURL.JoinPath("/api/device-data/report").String()
+
+	req, err := http.NewRequest("POST", webhookURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Fatalf("Error creating HTTP request: %v", err)
+	}
+
+	// Append headers
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Workspace-Slug", config.WorkspaceSlug)
-	
-	// Note: For absolute security, this secret could also be pushed via the UEM registry config 
-	// rather than hardcoded, but we will use your example secret here.
 	req.Header.Set("X-Device-Report-Secret", "db4rLzdlJBo08SArnnH9pHZm")
 
 	// 5. Execute Request
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Fatalf("Failed to send report to webhook: %v", err)
+		log.Fatalf("Failed to send report to webhook at %s: %v", webhookURL, err)
 	}
 	defer resp.Body.Close()
 
