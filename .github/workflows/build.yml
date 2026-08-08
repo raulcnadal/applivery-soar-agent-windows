@@ -43,36 +43,41 @@ jobs:
           name: Applivery-SOAR-Agent-amd64
           path: Applivery-SOAR-Agent-amd64.msi
 
-  # ------------------------------------------------------------------
-  # JOB 2: ARM64 MSI build on Windows using WiX v4
-  # ------------------------------------------------------------------
-  build-arm64:
-    name: Build ARM64 MSI (Windows / WiX v4)
-    runs-on: windows-latest
+		# ------------------------------------------------------------------
+	  # JOB 2: ARM64 MSI build on Windows using WiX v4
+	  # ------------------------------------------------------------------
+	  build-arm64:
+	    name: Build ARM64 MSI (Windows / WiX v4)
+	    runs-on: windows-latest
 
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+	    steps:
+	      - name: Checkout Code
+	        uses: actions/checkout@v4
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22.x'
+	      - name: Setup Go
+	        uses: actions/setup-go@v5
+	        with:
+	          go-version: '1.26.x'
 
-      - name: Install WiX Toolset v4
-        run: dotnet tool install --global wix --version "4.*"
+	      - name: Install WiX Toolset v4
+	        run: dotnet tool install --global wix --version "4.*"
 
-      - name: Build Go ARM64 Executable
-        env:
-          GOOS: windows
-          GOARCH: arm64
-        run: go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Agent.exe .
+	      - name: Build Go ARM64 Executable
+	        env:
+	          GOOS: windows
+	          GOARCH: arm64
+	        run: go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Agent.exe .
 
-      - name: Compile ARM64 MSI
-        run: wix build -arch arm64 -out Applivery-SOAR-Agent-arm64.msi agent.wxs
+	      # --- NEW STEP: Convert the v3 XML to v4 on the fly ---
+	      - name: Convert WiX v3 manifest to v4
+	        run: wix convert agent.wxs
 
-      - name: Upload ARM64 Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Applivery-SOAR-Agent-arm64
-          path: Applivery-SOAR-Agent-arm64.msi
+	      - name: Compile ARM64 MSI
+	        # WiX v4 builds the dynamically converted file
+	        run: wix build -arch arm64 -out Applivery-SOAR-Agent-arm64.msi agent.wxs
+
+	      - name: Upload ARM64 Artifact
+	        uses: actions/upload-artifact@v4
+	        with:
+	          name: Applivery-SOAR-Agent-arm64
+	          path: Applivery-SOAR-Agent-arm64.msi
