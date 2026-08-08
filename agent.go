@@ -72,7 +72,7 @@ func gatherAndReport(config AgentConfig) {
 		Attributes:   attributes,
 	}
 
-	sendReport(client, baseURL.JoinPath("/api/device-data/report").String(), config.WorkspaceSlug, securityPayload)
+	sendReport(client, baseURL.JoinPath("/api/device-data/report").String(), config, securityPayload)
 
 	// 2. Report Installed Software Inventory (if enabled)
 	if config.ReportApps {
@@ -82,33 +82,51 @@ func gatherAndReport(config AgentConfig) {
 			Apps:         GetInstalledApps(),
 		}
 
-		sendReport(client, baseURL.JoinPath("/api/device-data/report-apps").String(), config.WorkspaceSlug, appsPayload)
+		sendReport(client, baseURL.JoinPath("/api/device-data/report-apps").String(), config, appsPayload)
 	}
 }
 
-func sendReport(client *http.Client, targetURL, workspaceSlug string, payload interface{}) {
+func sendReport(client *http.Client, targetURL string, config AgentConfig, payload interface{}) {
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("Error marshaling JSON payload for %s: %v", targetURL, err)
 		return
 	}
 
-	req, err := http.NewRequest("POST", targetURL, bytes.NewBuffer(jsonData))
-	if err != nil {
-		log.Printf("Error creating HTTP request for %s: %v", targetURL, err)
-		return
+	maxRetries := 3
+	for i := 1; i <= maxRetries; i++ {
+		req, err := http.NewRequest("POST", targetURL, bytes.NewBuffer(jsonData))
+		if err != nil {
+			log.Printf("Fatal error creating HTTP request for %s: %v", targetURL, err)
+			return 
+		}
+
+		// Inject headers dynamically from the UEM configuration
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Workspace-Slug", config.WorkspaceSlug)
+		req.Header.Set("X-Device-Report-Secret", config.ReportSecret) // No longer hardcoded!
+
+		resp, err := client.Do(req)
+		
+		// Handle successful network transmission
+		if err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				log.Printf("Report successfully sent to %s -> HTTP Status %d", targetURL, resp.StatusCode)
+				return // Success, exit the retry loop
+			}
+			log.Printf("Attempt %d: Received non-success status %d from %s", i, resp.StatusCode, targetURL)
+		} else {
+			log.Printf("Attempt %d: Network error sending report to %s: %v", i, targetURL, err)
+		}
+
+		// If it failed and we haven't reached max retries, sleep and try again
+		if i < maxRetries {
+			sleepDuration := time.Duration(i*5) * time.Second // Simple backoff: wait 5s, then 10s
+			log.Printf("Retrying in %v...", sleepDuration)
+			time.Sleep(sleepDuration)
+		}
 	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Workspace-Slug", workspaceSlug)
-	req.Header.Set("X-Device-Report-Secret", "db4rLzdlJBo08SArnnH9pHZm")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("Failed to send report to %s: %v", targetURL, err)
-		return
-	}
-	defer resp.Body.Close()
-
-	log.Printf("Report sent to %s -> HTTP Status %d", targetURL, resp.StatusCode)
+	
+	log.Printf("Failed to send report to %s after %d attempts. Will try again next cycle.", targetURL, maxRetries)
 }
