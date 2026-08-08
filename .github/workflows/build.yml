@@ -7,47 +7,8 @@ on:
     branches: [ "main" ]
 
 jobs:
-  # ------------------------------------------------------------------
-  # JOB 1: Fast x64 MSI build on Linux using wixl
-  # ------------------------------------------------------------------
-  build-x64:
-    name: Build x64 MSI (Linux / wixl)
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22.x'
-
-      - name: Install wixl
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wixl msitools
-
-      - name: Build Go x64 Executable
-        env:
-          GOOS: windows
-          GOARCH: amd64
-        run: go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Agent.exe .
-
-      - name: Compile x64 MSI
-        run: wixl -a x64 -o Applivery-SOAR-Agent-amd64.msi agent.wxs
-
-      - name: Upload x64 Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Applivery-SOAR-Agent-amd64
-          path: Applivery-SOAR-Agent-amd64.msi
-
-  # ------------------------------------------------------------------
-  # JOB 2: ARM64 MSI build on Windows using WiX v4
-  # ------------------------------------------------------------------
-  build-arm64:
-    name: Build ARM64 MSI (Windows / WiX v4)
+  build-windows:
+    name: Build All MSIs (Windows / WiX v4)
     runs-on: windows-latest
 
     steps:
@@ -57,19 +18,38 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22.x'
+          go-version: '1.22.x' # Updated to match your Linux job's version
 
       - name: Install WiX Toolset v4
         run: dotnet tool install --global wix --version "4.*"
 
+      # ---------------------------------------------------
+      # 1. BUILD x64 MSI
+      # ---------------------------------------------------
+      - name: Build Go x64 Executable
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Agent.exe .
+
+      - name: Compile x64 MSI
+        run: wix build -arch x64 -out Applivery-SOAR-Agent-amd64.msi agent.wxs
+
+      - name: Upload x64 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Applivery-SOAR-Agent-amd64
+          path: Applivery-SOAR-Agent-amd64.msi
+
+      # ---------------------------------------------------
+      # 2. BUILD ARM64 MSI
+      # ---------------------------------------------------
       - name: Build Go ARM64 Executable
         env:
           GOOS: windows
           GOARCH: arm64
+        # This overwrites the x64 exe so WiX picks up the ARM one natively
         run: go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Agent.exe .
-
-      - name: Convert WiX v3 manifest to v4
-        run: wix convert agent.wxs
 
       - name: Compile ARM64 MSI
         run: wix build -arch arm64 -out Applivery-SOAR-Agent-arm64.msi agent.wxs
