@@ -8,28 +8,28 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-// AgentConfig holds the dynamic settings provided by the UEM
 type AgentConfig struct {
 	ReportBitLocker bool
 	ReportFirewall  bool
+	ReportApps      bool
 	WorkspaceSlug   string
-	BaseURL         string // <--- Added for custom SOAR domains
+	BaseURL         string
 }
 
-// LoadConfig reads the Managed Configuration from the Windows Registry
 func LoadConfig() AgentConfig {
 	config := AgentConfig{
 		ReportBitLocker: true,
 		ReportFirewall:  true,
+		ReportApps:      true,
 		WorkspaceSlug:   "default-workspace",
-		BaseURL:         "https://soar.mi-labs.es", // Default fallback if not set by UEM
+		BaseURL:         "https://soar.mi-labs.es",
 	}
 
 	registryPath := `SOFTWARE\Policies\Applivery\SOAR`
 
 	key, err := registry.OpenKey(registry.LOCAL_MACHINE, registryPath, registry.QUERY_VALUE)
 	if err != nil {
-		log.Printf("Notice: Managed Configuration registry key not found at HKLM\\%s. Using defaults.", registryPath)
+		log.Printf("Notice: Managed Configuration key not found at HKLM\\%s. Using defaults.", registryPath)
 		return config
 	}
 	defer key.Close()
@@ -37,16 +37,15 @@ func LoadConfig() AgentConfig {
 	if val, _, err := key.GetIntegerValue("ReportBitLocker"); err == nil {
 		config.ReportBitLocker = val != 0
 	}
-
 	if val, _, err := key.GetIntegerValue("ReportFirewall"); err == nil {
 		config.ReportFirewall = val != 0
 	}
-
+	if val, _, err := key.GetIntegerValue("ReportApps"); err == nil {
+		config.ReportApps = val != 0
+	}
 	if val, _, err := key.GetStringValue("WorkspaceSlug"); err == nil {
 		config.WorkspaceSlug = val
 	}
-
-	// Read the custom Base URL from the registry
 	if val, _, err := key.GetStringValue("BaseURL"); err == nil && val != "" {
 		config.BaseURL = val
 	}

@@ -13,7 +13,6 @@ import (
 	"time"
 )
 
-// DeviceData matches the JSON payload expected by your SOAR webhook
 type DeviceData struct {
 	Platform     string                 `json:"platform"`
 	SerialNumber string                 `json:"serialNumber"`
@@ -23,62 +22,72 @@ type DeviceData struct {
 func main() {
 	fmt.Println("Starting Applivery SOAR Windows Agent...")
 
-	// 1. Read UEM configuration from HKLM\SOFTWARE\Policies
+	// 1. Load configuration from Registry
 	config := LoadConfig()
 
-	// 2. Gather WMI data based on UEM configuration preferences
-	attributes := make(map[string]interface{})
-
-	if config.ReportBitLocker {
-		attributes["BitLockerStatus"] = GetBitLockerStatus()
-	}
-
-	if config.ReportFirewall {
-		attributes["FirewallEnabled"] = GetFirewallStatus()
-	}
-
-	// We will always report OS Build for this example
-	attributes["OsBuild"] = GetOSBuild()
-
-	// 3. Construct the JSON payload
-	payload := DeviceData{
-		Platform:     "windows",
-		SerialNumber: GetSerialNumber(), // Fetched dynamically via WMI
-		Attributes:   attributes,
-	}
-
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		log.Fatalf("Error marshaling JSON: %v", err)
-	}
-
-	// 4. Construct the Endpoint and POST the data
-	// Parse the base URL provided by the registry
 	baseURL, err := url.Parse(config.BaseURL)
 	if err != nil {
 		log.Fatalf("Invalid BaseURL in configuration: %v", err)
 	}
 
-	// Safely append the specific device-data/report endpoint
-	webhookURL := baseURL.JoinPath("/api/device-data/report").String()
+	serialNumber := GetSerialNumber()
+	client := &http.Client{Timeout: 15 * time.Second}
 
-	req, err := http.NewRequest("POST", webhookURL, bytes.NewBuffer(jsonData))
-	if err != nil {
-		log.Fatalf("Error creating HTTP request: %v", err)
+	// 2. Report Security & OS Attributes
+	attributes := make(map[string]interface{})
+	if config.ReportBitLocker {
+		attributes["BitLockerStatus"] = GetBitLockerStatus()
+	}
+	if config.ReportFirewall {
+		attributes["FirewallEnabled"] = GetFirewallStatus()
+	}
+	attributes["OsBuild"] = GetOSBuild()
+
+	securityPayload := DeviceData{
+		Platform:     "windows",
+		SerialNumber: serialNumber,
+		Attributes:   attributes,
 	}
 
-	// Append headers
+	sendReport(client, baseURL.JoinPath("/api/device-data/report").String(), config.WorkspaceSlug, securityPayload)
+
+	// 3. Report Installed Software Inventory (if enabled)
+	if config.ReportApps {
+		appsPayload := AppsPayload{
+			Platform:     "windows",
+			SerialNumber: serialNumber,
+			Apps:         GetInstalledApps(),
+		}
+
+		sendReport(client, baseURL.JoinPath("/api/device-data/report-apps").String(), config.WorkspaceSlug, appsPayload)
+	}
+
+	log.Println("Applivery SOAR Agent execution completed.")
+}
+
+func sendReport(client *http.Client, targetURL, workspaceSlug string, payload interface{}) {
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("Error marshaling JSON payload for %s: %v", targetURL, err)
+		return
+	}
+
+	req, err := http.NewRequest("POST", targetURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Printf("Error creating HTTP request for %s: %v", targetURL, err)
+		return
+	}
+
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Workspace-Slug", config.WorkspaceSlug)
+	req.Header.Set("X-Workspace-Slug", workspaceSlug)
 	req.Header.Set("X-Device-Report-Secret", "db4rLzdlJBo08SArnnH9pHZm")
 
-	// 5. Execute Request
-	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Fatalf("Failed to send report to webhook at %s: %v", webhookURL, err)
+		log.Printf("Failed to send report to %s: %v", targetURL, err)
+		return
 	}
 	defer resp.Body.Close()
 
-	log.Printf("Successfully sent device data! Server responded with status code: %d", resp.StatusCode)
+	log.Printf("Report sent to %s -> HTTP Status %d", targetURL, resp.StatusCode)
 }
