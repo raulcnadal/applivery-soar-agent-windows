@@ -4,90 +4,61 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
 	"log"
-	"net/http"
-	"net/url"
-	"time"
+	"os"
+
+	"golang.org/x/sys/windows/svc"
 )
 
-type DeviceData struct {
-	Platform     string                 `json:"platform"`
-	SerialNumber string                 `json:"serialNumber"`
-	Attributes   map[string]interface{} `json:"attributes"`
+type agentService struct{}
+
+// Execute is called by the Windows Service Control Manager
+func (m *agentService) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (ssec bool, errno uint32) {
+	const cmdsAccepted = svc.AcceptStop | svc.AcceptShutdown
+	changes <- svc.Status{State: svc.StartPending}
+	changes <- svc.Status{State: svc.Running, Accepts: cmdsAccepted}
+
+	// Load config using your existing registry_windows.go logic
+	config := LoadConfig()
+	stopChan := make(chan struct{})
+
+	// Start the telemetry execution loop in the background
+	go runAgentLoop(config, stopChan)
+
+	// Wait for Windows to tell us to stop
+	for c := range r {
+		switch c.Cmd {
+		case svc.Interrogate:
+			changes <- c.CurrentStatus
+		case svc.Stop, svc.Shutdown:
+			close(stopChan)
+			changes <- svc.Status{State: svc.StopPending}
+			return
+		}
+	}
+	return
 }
 
 func main() {
-	fmt.Println("Starting Applivery SOAR Windows Agent...")
-
-	// 1. Load configuration from Registry
-	config := LoadConfig()
-
-	baseURL, err := url.Parse(config.BaseURL)
+	// Check if running as a real Windows service or just a manual test
+	isInteractive, err := svc.IsAnInteractiveSession()
 	if err != nil {
-		log.Fatalf("Invalid BaseURL in configuration: %v", err)
+		log.Fatalf("Failed to determine if we are running interactively: %v", err)
 	}
 
-	serialNumber := GetSerialNumber()
-	client := &http.Client{Timeout: 15 * time.Second}
-
-	// 2. Report Security & OS Attributes
-	attributes := make(map[string]interface{})
-	if config.ReportBitLocker {
-		attributes["BitLockerStatus"] = GetBitLockerStatus()
-	}
-	if config.ReportFirewall {
-		attributes["FirewallEnabled"] = GetFirewallStatus()
-	}
-	attributes["OsBuild"] = GetOSBuild()
-
-	securityPayload := DeviceData{
-		Platform:     "windows",
-		SerialNumber: serialNumber,
-		Attributes:   attributes,
+	if isInteractive {
+		log.Println("Running interactively (Debug Mode)")
+		config := LoadConfig()
+		stopChan := make(chan struct{})
+		
+		// Run directly in the console
+		runAgentLoop(config, stopChan)
+		os.Exit(0)
 	}
 
-	sendReport(client, baseURL.JoinPath("/api/device-data/report").String(), config.WorkspaceSlug, securityPayload)
-
-	// 3. Report Installed Software Inventory (if enabled)
-	if config.ReportApps {
-		appsPayload := AppsPayload{
-			Platform:     "windows",
-			SerialNumber: serialNumber,
-			Apps:         GetInstalledApps(),
-		}
-
-		sendReport(client, baseURL.JoinPath("/api/device-data/report-apps").String(), config.WorkspaceSlug, appsPayload)
-	}
-
-	log.Println("Applivery SOAR Agent execution completed.")
-}
-
-func sendReport(client *http.Client, targetURL, workspaceSlug string, payload interface{}) {
-	jsonData, err := json.Marshal(payload)
+	// Run as a background service
+	err = svc.Run("AppliverySOARAgent", &agentService{})
 	if err != nil {
-		log.Printf("Error marshaling JSON payload for %s: %v", targetURL, err)
-		return
+		log.Fatalf("Service failed: %v", err)
 	}
-
-	req, err := http.NewRequest("POST", targetURL, bytes.NewBuffer(jsonData))
-	if err != nil {
-		log.Printf("Error creating HTTP request for %s: %v", targetURL, err)
-		return
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Workspace-Slug", workspaceSlug)
-	req.Header.Set("X-Device-Report-Secret", "db4rLzdlJBo08SArnnH9pHZm")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("Failed to send report to %s: %v", targetURL, err)
-		return
-	}
-	defer resp.Body.Close()
-
-	log.Printf("Report sent to %s -> HTTP Status %d", targetURL, resp.StatusCode)
 }
