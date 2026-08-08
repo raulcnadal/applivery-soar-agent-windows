@@ -5,51 +5,60 @@ package main
 
 import (
 	"log"
+
 	"golang.org/x/sys/windows/registry"
 )
 
 type AgentConfig struct {
+	BaseURL         string
+	WorkspaceSlug   string
+	ReportSecret    string // <-- Added this field
 	ReportBitLocker bool
 	ReportFirewall  bool
 	ReportApps      bool
-	WorkspaceSlug   string
-	BaseURL         string
 }
 
 func LoadConfig() AgentConfig {
+	// 1. Safe defaults in case the UEM hasn't pushed the config yet
 	config := AgentConfig{
+		BaseURL:         "https://soar.mi-labs.es",
+		WorkspaceSlug:   "friendly-emporium",
+		ReportSecret:    "db4rLzdlJBo08SArnnH9pHZm", // <-- Added safe default
 		ReportBitLocker: true,
 		ReportFirewall:  true,
-		ReportApps:      true,
-		WorkspaceSlug:   "default-workspace",
-		BaseURL:         "https://soar.mi-labs.es",
+		ReportApps:      false,
 	}
 
-	registryPath := `SOFTWARE\Policies\Applivery\SOAR`
-
-	key, err := registry.OpenKey(registry.LOCAL_MACHINE, registryPath, registry.QUERY_VALUE)
+	// 2. Open the Registry Key where the UEM drops the configuration
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Policies\Applivery\SOAR`, registry.QUERY_VALUE)
 	if err != nil {
-		log.Printf("Notice: Managed Configuration key not found at HKLM\\%s. Using defaults.", registryPath)
+		log.Println("No Managed Configuration found in Registry. Using default settings.")
 		return config
 	}
-	defer key.Close()
+	defer k.Close()
 
-	if val, _, err := key.GetIntegerValue("ReportBitLocker"); err == nil {
-		config.ReportBitLocker = val != 0
-	}
-	if val, _, err := key.GetIntegerValue("ReportFirewall"); err == nil {
-		config.ReportFirewall = val != 0
-	}
-	if val, _, err := key.GetIntegerValue("ReportApps"); err == nil {
-		config.ReportApps = val != 0
-	}
-	if val, _, err := key.GetStringValue("WorkspaceSlug"); err == nil {
-		config.WorkspaceSlug = val
-	}
-	if val, _, err := key.GetStringValue("BaseURL"); err == nil && val != "" {
+	// 3. Overwrite defaults with any values found in the Registry
+	if val, _, err := k.GetStringValue("BaseURL"); err == nil && val != "" {
 		config.BaseURL = val
 	}
+	if val, _, err := k.GetStringValue("WorkspaceSlug"); err == nil && val != "" {
+		config.WorkspaceSlug = val
+	}
+	// Fetch the dynamic secret from the UEM
+	if val, _, err := k.GetStringValue("ReportSecret"); err == nil && val != "" {
+		config.ReportSecret = val
+	}
+	
+	// Boolean toggles (1 = true, 0 = false)
+	if val, _, err := k.GetIntegerValue("ReportBitLocker"); err == nil {
+		config.ReportBitLocker = val == 1
+	}
+	if val, _, err := k.GetIntegerValue("ReportFirewall"); err == nil {
+		config.ReportFirewall = val == 1
+	}
+	if val, _, err := k.GetIntegerValue("ReportApps"); err == nil {
+		config.ReportApps = val == 1
+	}
 
-	log.Println("Successfully loaded Managed Configuration from Registry.")
 	return config
 }
