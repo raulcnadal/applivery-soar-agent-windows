@@ -79,7 +79,6 @@ func gatherAndReport(config Config) {
 			SerialNumber: serialNumber,
 			Apps:         apps,
 		}
-		// If you have a separate apps endpoint, post appsPayload here similarly
 		_ = appsPayload
 	}
 }
