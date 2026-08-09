@@ -6,6 +6,8 @@ package main
 import (
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"golang.org/x/sys/windows/svc"
 )
@@ -48,9 +50,14 @@ func main() {
 		
 		go runAgentLoop(config, stopChan)
 
-		// Block main thread until interrupted
+		// Block main thread until interrupted. An earlier version of this
+		// created sigChan but never registered it with signal.Notify, so
+		// Ctrl+C in debug mode never actually reached it — the process
+		// could only be killed forcibly.
 		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 		<-sigChan
+		log.Println("Interrupted — shutting down.")
 		close(stopChan)
 		return
 	}

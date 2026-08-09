@@ -49,19 +49,35 @@ func GetBitLockerStatus() bool {
 	return dst[0].ProtectionStatus == 1
 }
 
+// GetFirewallStatus checks all three Windows Firewall profiles — Domain,
+// Standard (a.k.a. Private), and Public — not just Standard. An earlier
+// version of this function only read StandardProfile, so a domain-joined
+// machine with its Domain profile firewall off (while Private/Public stayed
+// on, the common default) would still report FirewallEnabled=true. Windows
+// itself only ever has ONE profile active at a time based on the network's
+// detected category, and there's no single WMI/registry read that reports
+// "which profile is active right now" as reliably as just checking every
+// profile that exists — so this reports true only if every profile present
+// has its firewall on; a profile key that doesn't exist is treated as
+// enabled, matching Windows' own default (all three profiles ship
+// enabled unless an admin explicitly turned one off).
 func GetFirewallStatus() bool {
-	// Reads the Domain/Standard profile directly from the Registry
-	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile`, registry.QUERY_VALUE)
-	if err != nil {
-		return false
+	profiles := []string{"DomainProfile", "StandardProfile", "PublicProfile"}
+	for _, profile := range profiles {
+		path := `SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\` + profile
+		k, err := registry.OpenKey(registry.LOCAL_MACHINE, path, registry.QUERY_VALUE)
+		if err != nil {
+			// Key absent — not the same as "disabled"; Windows treats an
+			// unconfigured profile as enabled (its own shipped default).
+			continue
+		}
+		val, _, err := k.GetIntegerValue("EnableFirewall")
+		k.Close()
+		if err == nil && val == 0 {
+			return false
+		}
 	}
-	defer k.Close()
-
-	val, _, err := k.GetIntegerValue("EnableFirewall")
-	if err != nil {
-		return false
-	}
-	return val == 1
+	return true
 }
 
 func GetSerialNumber() string {
