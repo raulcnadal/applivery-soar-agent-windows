@@ -1,3 +1,6 @@
+//go:build !windows
+// +build !windows
+
 package main
 
 import (
@@ -7,23 +10,27 @@ import (
 )
 
 type Config struct {
-	WebhookUrl    string `json:"webhook_url"`
-	WorkspaceSlug string `json:"workspace_slug"`
-	ReportSecret  string `json:"report_secret"`
-	IntervalSec   int    `json:"interval_sec"`
+	BaseURL         string `json:"base_url"`
+	WorkspaceSlug   string `json:"workspace_slug"`
+	ReportSecret    string `json:"report_secret"`
+	IntervalSec     int    `json:"interval_sec"`
+	ReportBitLocker bool   `json:"report_bitlocker"`
+	ReportFirewall  bool   `json:"report_firewall"`
+	ReportApps      bool   `json:"report_apps"`
 }
 
 func LoadConfig() Config {
-	// 1. Define safe defaults
 	cfg := Config{
-		WebhookUrl:    "https://soar.mi-labs.es/api/device-data/report",
-		WorkspaceSlug: "friendly-emporium",
-		ReportSecret:  "db4rLzdlJBo08SArnnH9pHZm",
-		IntervalSec:   3600, // 1 hour
+		BaseURL:         "https://soar.mi-labs.es",
+		WorkspaceSlug:   "friendly-emporium",
+		ReportSecret:    "db4rLzdlJBo08SArnnH9pHZm",
+		IntervalSec:     3600,
+		ReportBitLocker: true,
+		ReportFirewall:  true,
+		ReportApps:      false,
 	}
 
-	// 2. Read UEM Managed Config (if it exists)
-	configPath := "C:\\ProgramData\\Applivery\\config.json"
+	configPath := "/Library/Preferences/es.mi-labs.soar.agent.json"
 	file, err := os.Open(configPath)
 	if err != nil {
 		log.Printf("No managed config found at %s, using defaults.", configPath)
@@ -31,7 +38,6 @@ func LoadConfig() Config {
 	}
 	defer file.Close()
 
-	// 3. Parse and overwrite defaults with UEM values
 	if err := json.NewDecoder(file).Decode(&cfg); err != nil {
 		log.Printf("Failed to parse config: %v. Using defaults.", err)
 	}

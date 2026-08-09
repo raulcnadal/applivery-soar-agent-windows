@@ -12,20 +12,16 @@ import (
 
 type agentService struct{}
 
-// Execute is called by the Windows Service Control Manager
 func (m *agentService) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (ssec bool, errno uint32) {
 	const cmdsAccepted = svc.AcceptStop | svc.AcceptShutdown
 	changes <- svc.Status{State: svc.StartPending}
 	changes <- svc.Status{State: svc.Running, Accepts: cmdsAccepted}
 
-	// Load config using your existing registry_windows.go logic
 	config := LoadConfig()
 	stopChan := make(chan struct{})
 
-	// Start the telemetry execution loop in the background
 	go runAgentLoop(config, stopChan)
 
-	// Wait for Windows to tell us to stop
 	for c := range r {
 		switch c.Cmd {
 		case svc.Interrogate:
@@ -40,10 +36,9 @@ func (m *agentService) Execute(args []string, r <-chan svc.ChangeRequest, change
 }
 
 func main() {
-	// Check if running as a real Windows service or just a manual test
 	isInteractive, err := svc.IsAnInteractiveSession()
 	if err != nil {
-		log.Fatalf("Failed to determine if we are running interactively: %v", err)
+		log.Fatalf("Failed to determine if running interactively: %v", err)
 	}
 
 	if isInteractive {
@@ -51,14 +46,17 @@ func main() {
 		config := LoadConfig()
 		stopChan := make(chan struct{})
 		
-		// Run directly in the console
-		runAgentLoop(config, stopChan)
-		os.Exit(0)
+		go runAgentLoop(config, stopChan)
+
+		// Block main thread until interrupted
+		sigChan := make(chan os.Signal, 1)
+		<-sigChan
+		close(stopChan)
+		return
 	}
 
-	// Run as a background service
 	err = svc.Run("AppliverySOARAgent", &agentService{})
 	if err != nil {
-		log.Fatalf("Service failed: %v", err)
+		log.Fatalf("Failed to start Windows service: %v", err)
 	}
 }

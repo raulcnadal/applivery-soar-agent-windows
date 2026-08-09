@@ -4,135 +4,120 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"log"
-	"strings"
-
-	"github.com/yusufpapurcu/wmi"
-	"golang.org/x/sys/windows/registry"
+	"net/http"
+	"net/url"
+	"time"
 )
 
-// --- Structs for JSON Payloads ---
-
-type App struct {
-	Identifier string `json:"identifier"`
-	Name       string `json:"name"`
-	Version    string `json:"version"`
+type DeviceData struct {
+	Platform     string                 `json:"platform"`
+	SerialNumber string                 `json:"serialNumber"`
+	Attributes   map[string]interface{} `json:"attributes"`
 }
 
-type AppsPayload struct {
-	Platform     string `json:"platform"`
-	SerialNumber string `json:"serialNumber"`
-	Apps         []App  `json:"apps"`
-}
+func runAgentLoop(config Config, stopChan <-chan struct{}) {
+	log.Println("Agent loop started. Reporting data...")
 
-// --- Structs for WMI Queries ---
-
-type Win32_BIOS struct {
-	SerialNumber string
-}
-
-type Win32_EncryptableVolume struct {
-	ProtectionStatus uint32
-}
-
-// --- Data Gathering Functions ---
-
-func GetSerialNumber() string {
-	var dst []Win32_BIOS
-	q := wmi.CreateQuery(&dst, "")
-	err := wmi.Query(q, &dst)
-	if err != nil || len(dst) == 0 {
-		log.Printf("Failed to get Serial Number via WMI: %v", err)
-		return "UNKNOWN"
+	interval := time.Duration(config.IntervalSec) * time.Second
+	if interval < 30*time.Second {
+		interval = 3600 * time.Second
 	}
-	return strings.TrimSpace(dst[0].SerialNumber)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	gatherAndReport(config)
+
+	for {
+		select {
+		case <-ticker.C:
+			gatherAndReport(config)
+		case <-stopChan:
+			log.Println("Agent loop received stop signal. Shutting down gracefully.")
+			return
+		}
+	}
 }
 
-func GetOSBuild() string {
-	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Windows NT\CurrentVersion`, registry.QUERY_VALUE)
+func gatherAndReport(config Config) {
+	log.Println("Gathering telemetry...")
+
+	baseURL, err := url.Parse(config.BaseURL)
 	if err != nil {
-		log.Printf("Failed to open Registry for OS Build: %v", err)
-		return "UNKNOWN"
+		log.Printf("Invalid BaseURL in configuration: %v", err)
+		return
 	}
-	defer k.Close()
+	targetURL := baseURL.ResolveReference(&url.URL{Path: "/api/device-data/report"}).String()
 
-	build, _, err := k.GetStringValue("CurrentBuild")
-	if err != nil {
-		return "UNKNOWN"
+	serialNumber := GetSerialNumber()
+	attributes := make(map[string]interface{})
+
+	attributes["OsBuild"] = GetOSBuild()
+
+	if config.ReportBitLocker {
+		attributes["BitLockerStatus"] = GetBitLockerStatus()
 	}
-	return build
+	if config.ReportFirewall {
+		attributes["FirewallEnabled"] = GetFirewallStatus()
+	}
+
+	payload := DeviceData{
+		Platform:     "windows",
+		SerialNumber: serialNumber,
+		Attributes:   attributes,
+	}
+
+	sendWebhook(targetURL, config, payload)
+
+	if config.ReportApps {
+		apps := GetInstalledApps()
+		appsPayload := AppsPayload{
+			Platform:     "windows",
+			SerialNumber: serialNumber,
+			Apps:         apps,
+		}
+		// If you have a separate apps endpoint, post appsPayload here similarly
+		_ = appsPayload
+	}
 }
 
-func GetBitLockerStatus() bool {
-	var dst []Win32_EncryptableVolume
-	// BitLocker requires querying a specific WMI namespace, just like your PS1 script
-	q := wmi.CreateQuery(&dst, "")
-	err := wmi.QueryNamespace(q, &dst, `root\CIMv2\Security\MicrosoftVolumeEncryption`)
-	
-	if err != nil || len(dst) == 0 {
-		log.Printf("Failed to query BitLocker WMI namespace (Requires Admin): %v", err)
-		return false
-	}
-	
-	// ProtectionStatus 1 means ON
-	return dst[0].ProtectionStatus == 1
-}
-
-func GetFirewallStatus() bool {
-	// Reads the Domain/Standard profile directly from the Registry
-	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile`, registry.QUERY_VALUE)
+func sendWebhook(targetURL string, config Config, payload DeviceData) {
+	client := &http.Client{Timeout: 15 * time.Second}
+	jsonData, err := json.Marshal(payload)
 	if err != nil {
-		return false
-	}
-	defer k.Close()
-
-	val, _, err := k.GetIntegerValue("EnableFirewall")
-	if err != nil {
-		return false
-	}
-	
-	// 1 means Enabled
-	return val == 1
-}
-
-func GetInstalledApps() []App {
-	var apps []App
-	
-	// Replicating the fallback logic from your apps-windows.ps1
-	paths := []string{
-		`SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall`,
-		`SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall`,
+		log.Printf("Error marshaling JSON payload: %v", err)
+		return
 	}
 
-	for _, path := range paths {
-		k, err := registry.OpenKey(registry.LOCAL_MACHINE, path, registry.ENUMERATE_SUB_KEYS|registry.QUERY_VALUE)
+	maxRetries := 3
+	for i := 1; i <= maxRetries; i++ {
+		req, err := http.NewRequest("POST", targetURL, bytes.NewBuffer(jsonData))
 		if err != nil {
-			continue
-		}
-		
-		subkeys, err := k.ReadSubKeyNames(-1)
-		k.Close()
-		if err != nil {
-			continue
+			log.Printf("Fatal error creating HTTP request: %v", err)
+			return
 		}
 
-		for _, subkey := range subkeys {
-			sk, err := registry.OpenKey(registry.LOCAL_MACHINE, path+`\`+subkey, registry.QUERY_VALUE)
-			if err != nil {
-				continue
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Workspace-Slug", config.WorkspaceSlug)
+		req.Header.Set("X-Device-Report-Secret", config.ReportSecret)
+
+		resp, err := client.Do(req)
+		if err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				log.Printf("Report successfully sent -> HTTP Status %d", resp.StatusCode)
+				return
 			}
-			
-			name, _, err := sk.GetStringValue("DisplayName")
-			if err == nil && name != "" {
-				version, _, _ := sk.GetStringValue("DisplayVersion")
-				apps = append(apps, App{
-					Identifier: strings.ToLower(name), 
-					Name:       name,
-					Version:    version,
-				})
-			}
-			sk.Close()
+			log.Printf("Attempt %d: Received non-success status %d", i, resp.StatusCode)
+		} else {
+			log.Printf("Attempt %d: Network error: %v", i, err)
+		}
+
+		if i < maxRetries {
+			time.Sleep(time.Duration(i) * 5 * time.Second)
 		}
 	}
-	return apps
 }

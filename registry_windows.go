@@ -9,27 +9,27 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-type AgentConfig struct {
+type Config struct {
 	BaseURL         string
 	WorkspaceSlug   string
-	ReportSecret    string // <-- Added this field
+	ReportSecret    string
 	ReportBitLocker bool
 	ReportFirewall  bool
 	ReportApps      bool
+	IntervalSec     int
 }
 
-func LoadConfig() AgentConfig {
-	// 1. Safe defaults in case the UEM hasn't pushed the config yet
-	config := AgentConfig{
+func LoadConfig() Config {
+	config := Config{
 		BaseURL:         "https://soar.mi-labs.es",
 		WorkspaceSlug:   "friendly-emporium",
-		ReportSecret:    "db4rLzdlJBo08SArnnH9pHZm", // <-- Added safe default
+		ReportSecret:    "db4rLzdlJBo08SArnnH9pHZm",
 		ReportBitLocker: true,
 		ReportFirewall:  true,
 		ReportApps:      false,
+		IntervalSec:     3600,
 	}
 
-	// 2. Open the Registry Key where the UEM drops the configuration
 	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Policies\Applivery\SOAR`, registry.QUERY_VALUE)
 	if err != nil {
 		log.Println("No Managed Configuration found in Registry. Using default settings.")
@@ -37,27 +37,27 @@ func LoadConfig() AgentConfig {
 	}
 	defer k.Close()
 
-	// 3. Overwrite defaults with any values found in the Registry
 	if val, _, err := k.GetStringValue("BaseURL"); err == nil && val != "" {
 		config.BaseURL = val
 	}
 	if val, _, err := k.GetStringValue("WorkspaceSlug"); err == nil && val != "" {
 		config.WorkspaceSlug = val
 	}
-	// Fetch the dynamic secret from the UEM
 	if val, _, err := k.GetStringValue("ReportSecret"); err == nil && val != "" {
 		config.ReportSecret = val
 	}
 	
-	// Boolean toggles (1 = true, 0 = false)
 	if val, _, err := k.GetIntegerValue("ReportBitLocker"); err == nil {
-		config.ReportBitLocker = val == 1
+		config.ReportBitLocker = (val == 1)
 	}
 	if val, _, err := k.GetIntegerValue("ReportFirewall"); err == nil {
-		config.ReportFirewall = val == 1
+		config.ReportFirewall = (val == 1)
 	}
 	if val, _, err := k.GetIntegerValue("ReportApps"); err == nil {
-		config.ReportApps = val == 1
+		config.ReportApps = (val == 1)
+	}
+	if val, _, err := k.GetIntegerValue("IntervalSec"); err == nil && val > 0 {
+		config.IntervalSec = int(val)
 	}
 
 	return config

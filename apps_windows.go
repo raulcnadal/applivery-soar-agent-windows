@@ -4,7 +4,6 @@
 package main
 
 import (
-	"log"
 	"strings"
 
 	"golang.org/x/sys/windows/registry"
@@ -22,7 +21,6 @@ type AppsPayload struct {
 	Apps         []InstalledApp `json:"apps"`
 }
 
-// GetInstalledApps enumerates installed software from 64-bit, 32-bit, and HKCU Uninstall registry paths
 func GetInstalledApps() []InstalledApp {
 	var apps []InstalledApp
 	seen := make(map[string]bool)
@@ -59,7 +57,6 @@ func GetInstalledApps() []InstalledApp {
 			systemComponent, _, _ := subKey.GetIntegerValue("SystemComponent")
 			subKey.Close()
 
-			// Skip components without names or system update components
 			if errName != nil || strings.TrimSpace(displayName) == "" || systemComponent == 1 {
 				continue
 			}
@@ -67,7 +64,6 @@ func GetInstalledApps() []InstalledApp {
 			displayName = strings.TrimSpace(displayName)
 			identifier := strings.ToLower(displayName)
 
-			// Deduplicate entries
 			if seen[identifier] {
 				continue
 			}
@@ -76,11 +72,10 @@ func GetInstalledApps() []InstalledApp {
 			apps = append(apps, InstalledApp{
 				Identifier: identifier,
 				Name:       displayName,
-				Version:    strings.TrimSpace(displayVersion),
+				Version:    displayVersion,
 			})
 		}
 	}
 
-	log.Printf("Discovered %d installed applications.", len(apps))
 	return apps
 }
