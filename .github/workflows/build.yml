@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [ "main" ]
 
+# Needed for the release step below to publish/update the "latest" tag's
+# GitHub Release via the workflow's own auto-issued GITHUB_TOKEN — no PAT
+# required for same-repo release publishing.
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     name: Build All MSIs (Windows / WiX v4)
@@ -59,3 +65,26 @@ jobs:
         with:
           name: Applivery-SOAR-Agent-arm64
           path: Applivery-SOAR-Agent-arm64.msi
+
+      # ---------------------------------------------------
+      # 3. PUBLISH — rolling "latest" GitHub Release, same tag reused on
+      #    every push to main (same pattern as applivery-soar's own
+      #    docker-publish.yml :latest tag). This repo is private, so
+      #    the migrated SOAR app's Settings > Device Data Webhook page
+      #    proxies these release assets through its own backend (which
+      #    needs a read-scoped GitHub token, configured there) rather
+      #    than linking to github.com directly. PR builds only run the
+      #    two steps above (artifact upload, for review) — only pushes
+      #    to main publish a release.
+      # ---------------------------------------------------
+      - name: Publish latest release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          body: Automated build from ${{ github.sha }}
+          make_latest: true
+          files: |
+            Applivery-SOAR-Agent-amd64.msi
+            Applivery-SOAR-Agent-arm64.msi
