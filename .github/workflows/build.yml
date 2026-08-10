@@ -52,12 +52,11 @@ jobs:
       #     endpoint (POST /api/internal/agent-builds/windows) — this is
       #     what lets a customer download the agent from Settings > Device
       #     Data Webhook with no GitHub token at all, same idea as this
-      #     app's own public Docker images. The x64 build is the one
-      #     mirrored here (the overwhelming majority of managed Windows
-      #     fleets); ARM64 remains available the old way, via the GitHub
-      #     Release below + the optional GitHub-token download path in
-      #     Settings. Requires the SOAR_AGENT_BUILD_SECRET repo secret —
-      #     a single operator-held value that must match
+      #     app's own public Docker images. X-Agent-Arch: amd64 identifies
+      #     which of the two Windows variants this is (the backend stores
+      #     one row per platform+arch) — the ARM64 build gets its own
+      #     publish step below, step 2b. Requires the SOAR_AGENT_BUILD_SECRET
+      #     repo secret — a single operator-held value that must match
       #     AGENT_BUILD_INGEST_SECRET on the backend deployment (NOT a
       #     GitHub PAT, and nothing customer/workspace-specific). Runs on
       #     push to main only — PR builds don't touch the live backend.
@@ -78,6 +77,7 @@ jobs:
             -H "X-Agent-Filename: Applivery-SOAR-Agent-amd64.msi" \
             -H "X-Agent-Content-Type: application/x-msi" \
             -H "X-Agent-Version: ${{ github.sha }}" \
+            -H "X-Agent-Arch: amd64" \
             --data-binary @Applivery-SOAR-Agent-amd64.msi
 
       # ---------------------------------------------------
@@ -98,6 +98,31 @@ jobs:
         with:
           name: Applivery-SOAR-Agent-arm64
           path: Applivery-SOAR-Agent-arm64.msi
+
+      # ---------------------------------------------------
+      # 2b. PUBLISH ARM64 MSI to the SOAR backend — same idea as step 1b
+      #     above, tagged X-Agent-Arch: arm64 so the backend stores it as
+      #     its own distinct (windows, arm64) build/asset rather than
+      #     overwriting the x64 one.
+      # ---------------------------------------------------
+      - name: Publish ARM64 MSI to SOAR backend
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          SOAR_BASE_URL: ${{ vars.SOAR_BASE_URL || 'https://soar.mi-labs.es' }}
+          SOAR_AGENT_BUILD_SECRET: ${{ secrets.SOAR_AGENT_BUILD_SECRET }}
+        run: |
+          if [ -z "$SOAR_AGENT_BUILD_SECRET" ]; then
+            echo "SOAR_AGENT_BUILD_SECRET is not set on this repo — skipping zero-config publish (the GitHub Release below still publishes normally)."
+            exit 0
+          fi
+          curl --fail-with-body -sS -X POST "$SOAR_BASE_URL/api/internal/agent-builds/windows" \
+            -H "X-Agent-Build-Secret: $SOAR_AGENT_BUILD_SECRET" \
+            -H "X-Agent-Filename: Applivery-SOAR-Agent-arm64.msi" \
+            -H "X-Agent-Content-Type: application/x-msi" \
+            -H "X-Agent-Version: ${{ github.sha }}" \
+            -H "X-Agent-Arch: arm64" \
+            --data-binary @Applivery-SOAR-Agent-arm64.msi
 
       # ---------------------------------------------------
       # 3. PUBLISH — rolling "latest" GitHub Release, same tag reused on

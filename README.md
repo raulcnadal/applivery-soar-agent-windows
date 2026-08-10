@@ -20,16 +20,19 @@ You don't need to build this yourself, and you don't need a GitHub token —
 the compiled MSI is downloadable straight from your SOAR instance:
 
 **Settings → Device Data Webhook → Applivery SOAR Agent**, click **Download**
-next to Windows. This app's own CI publishes a fresh x64 MSI there on every
-push to `main`, mirrored into the SOAR backend itself (no GitHub
-authentication needed, same as pulling a public Docker image). The same
-Settings page also has a **Publish to Applivery** button that uploads the
-binary straight into your Applivery organization's App Distribution, so it
-can be assigned to Policies like any other managed app.
+next to Windows (x64) or Windows (ARM64). This app's own CI publishes a
+fresh MSI for *both* architectures there on every push to `main`, mirrored
+into the SOAR backend itself (no GitHub authentication needed, same as
+pulling a public Docker image). The same Settings page has a **Publish to
+Applivery** button next to each — x64 and ARM64 are independent, each its
+own Applivery application — that uploads the binary straight into your
+Applivery organization, so it can be assigned to Policies like any other
+managed app.
 
-ARM64 builds and this repo's raw GitHub Releases remain available as a
-fallback via the optional GitHub-token path further down the same Settings
-panel, for anyone who already configured it.
+This repo's raw GitHub Releases remain available as a fallback via the
+optional GitHub-token path further down the same Settings panel, for anyone
+who already configured it or would rather not rely on the SOAR backend's own
+mirror.
 
 ---
 
@@ -183,9 +186,11 @@ wix build -arch x64 -out Applivery-SOAR-Agent-amd64.msi agent.wxs
 Cross-compile for ARM64 by setting `GOOS=windows GOARCH=arm64` before the
 `go build` step and passing `-arch arm64` to `wix build`. `.github/workflows/build.yml`
 does exactly this for both architectures on every push, and — on pushes to
-`main` — also publishes the x64 MSI to the SOAR backend's zero-config
-download endpoint (gated by the `SOAR_AGENT_BUILD_SECRET` repository secret)
-and republishes a rolling `latest` GitHub Release with both MSIs attached.
+`main` — also publishes both MSIs to the SOAR backend's zero-config download
+endpoint (gated by the `SOAR_AGENT_BUILD_SECRET` repository secret, each
+tagged with its own `X-Agent-Arch` header so the backend keeps them as two
+distinct downloads) and republishes a rolling `latest` GitHub Release with
+both MSIs attached.
 
 ---
 
