@@ -224,16 +224,24 @@ both MSIs attached.
   can immediately tell whether the registry key was actually read, and the
   HTTP result of each report attempt (`sent successfully -> HTTP Status 200`,
   or the exact non-2xx status / network error otherwise).
-* **Manual/interactive run** (still useful for watching live output —
-  the agent detects it isn't running as a service and echoes the same log
-  lines to the console in addition to the file, and `Ctrl+C` shuts it down
-  cleanly): stop the service first so both instances aren't reporting at
-  once, then:
+* **Manual/interactive run:** this build is linked `-H windowsgui` (so no
+  console window flashes up when SCM starts it as a service), which means
+  running the exe directly from PowerShell/cmd does **not** print anything
+  to that terminal — it's a GUI-subsystem process, so it detaches from the
+  launching console entirely and returns you to the prompt immediately, with
+  the agent continuing to run invisibly in the background. That's expected,
+  not a hang or a crash. `agent.log` is still the one place to watch —
+  tail it in a second window while it runs:
 
   ```powershell
   Stop-Service AppliverySOARAgent
-  .\Applivery-SOAR-Agent.exe
+  Start-Process .\Applivery-SOAR-Agent.exe
+  Get-Content 'C:\ProgramData\Applivery\SOAR\agent.log' -Wait -Tail 20
   ```
+
+  Find and stop the detached process when you're done (`Get-Process
+  Applivery-SOAR-Agent | Stop-Process`), then `Start-Service
+  AppliverySOARAgent` to put the real service back.
 
 * **"No WorkspaceSlug/ReportSecret" in the logs:** the registry key hasn't
   been populated yet — see *Configuration Reference* above. Confirm what's

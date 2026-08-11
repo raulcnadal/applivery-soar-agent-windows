@@ -14,15 +14,40 @@ import (
 	"golang.org/x/sys/windows/svc"
 )
 
+// bestEffortConsoleWriter wraps the log file so a broken/absent console
+// can never block the write that actually matters. This build is always
+// linked with -H windowsgui (deliberately — so no console window flashes up
+// when SCM starts this as a service), which means os.Stdout has no real
+// console handle attached: writing to it returns an error, both when SCM
+// launches the service AND when the exe is run directly from an existing
+// terminal (a windowsgui-subsystem process detaches from the launching
+// console entirely — this is also why running the exe by hand from
+// PowerShell returns instantly with no output instead of blocking). Using
+// io.MultiWriter(os.Stdout, file) here was the actual bug: MultiWriter
+// aborts on the first writer that errors, so a broken os.Stdout silently
+// stopped every single log.Printf across the whole agent from ever reaching
+// the file — the log directory and empty file got created by
+// setupFileLogging's own os.OpenFile, but not one byte after that ever
+// landed on disk, in either interactive or service mode. This type makes
+// the file the writer that must succeed and lets stdout fail silently.
+type bestEffortConsoleWriter struct {
+	file io.Writer
+}
+
+func (w bestEffortConsoleWriter) Write(p []byte) (int, error) {
+	_, _ = os.Stdout.Write(p) // best-effort only — a real console, if attached, still gets output; a broken one can't block the file write below.
+	return w.file.Write(p)
+}
+
 // setupFileLogging redirects the standard logger to
-// %ProgramData%\Applivery\SOAR\agent.log in addition to the console. This
-// exists because a Windows Service has no console at all — log.Println's
-// default os.Stderr destination goes nowhere once installed via the MSI and
-// started by SCM, so until now there was no way to see this agent's own
-// diagnostics ("did it read the registry key?", "did the POST succeed?")
-// without stopping the service and re-running the exe interactively. A
-// crude size-based rotation (single .old backup) keeps this from growing
-// unbounded over months of hourly cycles.
+// %ProgramData%\Applivery\SOAR\agent.log. This exists because a Windows
+// Service has no console at all — log.Println's default os.Stderr
+// destination goes nowhere once installed via the MSI and started by SCM,
+// so until now there was no way to see this agent's own diagnostics ("did
+// it read the registry key?", "did the POST succeed?") without stopping the
+// service and re-running the exe interactively. A crude size-based rotation
+// (single .old backup) keeps this from growing unbounded over months of
+// hourly cycles.
 func setupFileLogging() {
 	programData := os.Getenv("ProgramData")
 	if programData == "" {
@@ -45,7 +70,7 @@ func setupFileLogging() {
 		log.Printf("Could not open log file %s: %v — logging to console only.", logPath, err)
 		return
 	}
-	log.SetOutput(io.MultiWriter(os.Stdout, f))
+	log.SetOutput(bestEffortConsoleWriter{file: f})
 	log.Printf("Logging to %s", logPath)
 }
 
