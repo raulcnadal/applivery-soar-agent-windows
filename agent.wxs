@@ -3,7 +3,19 @@
   
   <Package Name="Applivery SOAR Agent" Manufacturer="Applivery" Version="1.0.0.0" UpgradeCode="a138cf96-14fb-4f92-bfe3-0aba460a6275" Scope="perMachine">
     
-    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <!-- AllowSameVersionUpgrades: this repo's CI never bumps Package
+         Version="1.0.0.0" above — every push publishes new binary content
+         under the same version string (the same "rolling latest build,
+         content-addressed not version-addressed" model already used for
+         Applivery asset dedup elsewhere in this project). Without this
+         attribute, Windows Installer treats a same-version reinstall as
+         "already installed, nothing to do" and silently skips replacing the
+         files — a UEM re-push (or a manual re-run of the same MSI) would
+         leave the OLD binary running indefinitely with no error anywhere.
+         With it, MajorUpgrade's uninstall-old/install-new sequence runs
+         even when ProductVersion is unchanged, so every push actually takes
+         effect. -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." AllowSameVersionUpgrades="yes" />
     <MediaTemplate EmbedCab="yes" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
