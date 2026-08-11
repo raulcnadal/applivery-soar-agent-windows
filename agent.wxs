@@ -20,10 +20,46 @@
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Applivery SOAR Agent">
-        
+
+        <!-- Declared BEFORE AgentExecutable below deliberately: WiX schedules
+             each component's ServiceControl Stop/Start rows into the standard
+             StopServices/StartServices actions in component-declaration
+             order, so this ordering makes the real sequence
+             "stop watchdog, stop agent, [replace files], start agent, start
+             watchdog" on every install/upgrade/uninstall. That matters
+             because these two services watch each other (svcwatch package,
+             internal/svcwatch/svcwatch.go) and restart their partner if it's
+             found stopped — if MSI stopped the agent first while the
+             watchdog was still running and still polling, the watchdog could
+             restart the (about to be overwritten) agent exe mid-upgrade,
+             re-locking a file MSI is trying to replace. Stopping the
+             watchdog first removes the one thing that would otherwise fight
+             the installer. -->
+        <Component Id="WatchdogExecutable" Bitness="always64">
+          <File Id="AppliverySOARWatchdogExe" Source="Applivery-SOAR-Watchdog.exe" KeyPath="yes" />
+
+          <ServiceInstall
+            Id="WatchdogServiceInstaller"
+            Type="ownProcess"
+            Name="AppliverySOARWatchdog"
+            DisplayName="Applivery SOAR Watchdog"
+            Description="Monitors the Applivery SOAR Agent service and restarts it if it stops unexpectedly."
+            Start="auto"
+            Account="LocalSystem"
+            ErrorControl="normal" />
+
+          <ServiceControl
+            Id="WatchdogServiceControl"
+            Start="install"
+            Stop="both"
+            Remove="uninstall"
+            Name="AppliverySOARWatchdog"
+            Wait="yes" />
+        </Component>
+
         <Component Id="AgentExecutable" Bitness="always64">
           <File Id="AppliverySOARAgentExe" Source="Applivery-SOAR-Agent.exe" KeyPath="yes" />
-          
+
           <ServiceInstall
             Id="ServiceInstaller"
             Type="ownProcess"
@@ -41,15 +77,60 @@
             Remove="uninstall"
             Name="AppliverySOARAgent"
             Wait="yes" />
-            
+
         </Component>
-        
+
+        <!-- Not a service — see tray/main.go's package doc for why: services
+             run in Session 0 and can never show UI in a user's desktop
+             session. RegisterTrayTask/UnregisterTrayTask below (
+             InstallExecuteSequence) register a Scheduled Task instead, so
+             this exe launches once any user logs on. -->
+        <Component Id="TrayExecutable" Bitness="always64">
+          <File Id="AppliverySOARTrayExe" Source="Applivery-SOAR-Tray.exe" KeyPath="yes" />
+        </Component>
+
       </Directory>
     </StandardDirectory>
 
+    <!-- schtasks.exe is the standard way to register a per-logon Scheduled
+         Task from a WiX v4 installer — there's no native <ScheduledTask>
+         element in WiX v4's core schema. /RU "Users" scopes the ONLOGON
+         trigger to the built-in local "Users" group (i.e. any interactively
+         logged-on user), not just whichever account happens to run this
+         deferred custom action (which executes elevated, as the installer
+         service — without /RU it would otherwise register a task tied to
+         that account instead of "any user"). /RL LIMITED runs the tray
+         helper with standard-user rights, matching what a tray icon needs
+         (read a status file, show a menu, open a browser — nothing that
+         needs elevation). -->
+    <CustomAction Id="RegisterTrayTask"
+      Directory="INSTALLFOLDER"
+      ExeCommand="&quot;[System64Folder]schtasks.exe&quot; /Create /SC ONLOGON /TN &quot;Applivery SOAR Tray&quot; /TR &quot;\&quot;[INSTALLFOLDER]Applivery-SOAR-Tray.exe\&quot;&quot; /RU &quot;Users&quot; /RL LIMITED /F"
+      Execute="deferred"
+      Impersonate="no"
+      Return="check" />
+
+    <CustomAction Id="UnregisterTrayTask"
+      Directory="INSTALLFOLDER"
+      ExeCommand="&quot;[System64Folder]schtasks.exe&quot; /Delete /TN &quot;Applivery SOAR Tray&quot; /F"
+      Execute="deferred"
+      Impersonate="no"
+      Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- NOT REMOVE covers both a fresh install and the "install new"
+           half of a major upgrade; REMOVE covers both a plain uninstall
+           and the "remove old" half of a major upgrade — standard MSI
+           REMOVE-property idiom. -->
+      <Custom Action="RegisterTrayTask" After="InstallFiles" Condition="NOT REMOVE" />
+      <Custom Action="UnregisterTrayTask" Before="RemoveFiles" Condition="REMOVE" />
+    </InstallExecuteSequence>
+
     <Feature Id="MainFeature" Title="Applivery SOAR Agent">
+      <ComponentRef Id="WatchdogExecutable" />
       <ComponentRef Id="AgentExecutable" />
+      <ComponentRef Id="TrayExecutable" />
     </Feature>
-    
+
   </Package>
 </Wix>

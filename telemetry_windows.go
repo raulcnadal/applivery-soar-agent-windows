@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/raulcnadal/applivery-soar-agent-windows/internal/agentstatus"
 )
 
 type DeviceData struct {
@@ -123,7 +125,7 @@ func gatherAndReport() {
 		Attributes:         attributes,
 		CustomCheckResults: customCheckResults,
 	}
-	sendWebhook(reportURL, config, payload)
+	reportOK := sendWebhook(reportURL, config, payload)
 
 	if config.ReportApps {
 		apps := GetInstalledApps()
@@ -135,18 +137,68 @@ func gatherAndReport() {
 		appsURL := baseURL.ResolveReference(&url.URL{Path: "/api/device-data/report-apps"}).String()
 		sendWebhook(appsURL, config, appsPayload)
 	}
+
+	updateStatusCache(baseURL, config, serialNumber, attributes, reportOK)
+}
+
+// updateStatusCache is the tray icon's only data source (status_windows.go's
+// StatusCache doc comment has the full rationale): a local summary of what
+// this cycle just reported, plus a fresh pull of this device's Compliance
+// Policy status/score from the backend. Best-effort throughout — a failed
+// compliance fetch (no Automation Credential configured yet, a transient
+// network error, whatever) still lets the "what we reported" half of the
+// cache update, with Compliance.Available left false and a human-readable
+// reason for the tray to display.
+func updateStatusCache(baseURL *url.URL, config Config, serialNumber string, attributes map[string]interface{}, reportOK bool) {
+	cache := agentstatus.StatusCache{
+		WorkspaceSlug:     config.WorkspaceSlug,
+		BaseURL:           config.BaseURL,
+		SerialNumber:      serialNumber,
+		LastReportAt:      time.Now().UTC().Format(time.RFC3339),
+		LastReportOK:      reportOK,
+		ReportedBitLocker: config.ReportBitLocker,
+		ReportedFirewall:  config.ReportFirewall,
+		ReportedApps:      config.ReportApps,
+	}
+	if osBuild, ok := attributes["OsBuild"].(string); ok {
+		cache.OsBuild = osBuild
+	}
+	if v, ok := attributes["BitLockerStatus"].(bool); ok {
+		cache.BitLockerStatus = &v
+	}
+	if v, ok := attributes["FirewallEnabled"].(bool); ok {
+		cache.FirewallEnabled = &v
+	}
+
+	status, err := fetchAgentStatus(baseURL, config, serialNumber, "windows")
+	if err != nil {
+		log.Printf("Could not fetch compliance status for the tray icon: %v", err)
+		cache.Compliance = agentstatus.AgentStatusCompliance{Available: false, Reason: "Could not reach the SOAR backend for compliance status."}
+	} else {
+		cache.Compliance = status.Compliance
+		cache.DeviceMatched = status.Device.Matched
+		if status.Device.DisplayName != nil {
+			cache.DeviceName = *status.Device.DisplayName
+		}
+	}
+
+	writeStatusCache(cache)
 }
 
 // sendWebhook is shared by both the attributes report and the (optional)
 // app-inventory report — same endpoint family (POST /api/device-data/*),
 // same header pair, same retry/backoff policy. Accepts any JSON-marshalable
-// payload so both DeviceData and AppsPayload can reuse it.
-func sendWebhook(targetURL string, config Config, payload interface{}) {
+// payload so both DeviceData and AppsPayload can reuse it. Returns whether
+// the report ultimately succeeded (used by gatherAndReport to record
+// LastReportOK in the tray's status cache) — every caller before the status
+// cache feature ignored this return value entirely, so the behavior for
+// existing callers is unchanged.
+func sendWebhook(targetURL string, config Config, payload interface{}) bool {
 	client := &http.Client{Timeout: 15 * time.Second}
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("Error marshaling JSON payload: %v", err)
-		return
+		return false
 	}
 
 	maxRetries := 3
@@ -154,7 +206,7 @@ func sendWebhook(targetURL string, config Config, payload interface{}) {
 		req, err := http.NewRequest("POST", targetURL, bytes.NewBuffer(jsonData))
 		if err != nil {
 			log.Printf("Fatal error creating HTTP request: %v", err)
-			return
+			return false
 		}
 
 		req.Header.Set("Content-Type", "application/json")
@@ -166,7 +218,7 @@ func sendWebhook(targetURL string, config Config, payload interface{}) {
 			defer resp.Body.Close()
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				log.Printf("Report to %s sent successfully -> HTTP Status %d", targetURL, resp.StatusCode)
-				return
+				return true
 			}
 			log.Printf("Attempt %d: %s returned non-success status %d", i, targetURL, resp.StatusCode)
 		} else {
@@ -177,4 +229,5 @@ func sendWebhook(targetURL string, config Config, payload interface{}) {
 			time.Sleep(time.Duration(i) * 5 * time.Second)
 		}
 	}
+	return false
 }

@@ -10,8 +10,22 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/windows/svc"
+
+	"github.com/raulcnadal/applivery-soar-agent-windows/internal/svcwatch"
+)
+
+// watchdogServiceName/watchdogPollInterval/watchdogGraceDelay mirror the
+// constants of the same purpose in watchdog/main.go — this is the other
+// half of the mutual-watchdog pair (svcwatch package doc has the full
+// rationale): this agent watches AppliverySOARWatchdog the same way that
+// service watches this one.
+const (
+	watchdogServiceName  = "AppliverySOARWatchdog"
+	watchdogPollInterval = 30 * time.Second
+	watchdogGraceDelay   = 60 * time.Second
 )
 
 // bestEffortConsoleWriter wraps the log file so a broken/absent console
@@ -84,6 +98,7 @@ func (m *agentService) Execute(args []string, r <-chan svc.ChangeRequest, change
 	stopChan := make(chan struct{})
 
 	go runAgentLoop(stopChan)
+	go svcwatch.Monitor(watchdogServiceName, watchdogPollInterval, watchdogGraceDelay, stopChan)
 
 	for c := range r {
 		switch c.Cmd {
@@ -111,6 +126,7 @@ func main() {
 		stopChan := make(chan struct{})
 
 		go runAgentLoop(stopChan)
+		go svcwatch.Monitor(watchdogServiceName, watchdogPollInterval, watchdogGraceDelay, stopChan)
 
 		// Block main thread until interrupted. An earlier version of this
 		// created sigChan but never registered it with signal.Notify, so

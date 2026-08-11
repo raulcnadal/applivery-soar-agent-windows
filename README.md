@@ -7,10 +7,18 @@ custom admin-defined checks, then reports them to an
 where they become available as **Compliance Policy** conditions and
 Overview/Devices telemetry.
 
-The agent is compiled into a native 64-bit or ARM64 executable
-(`Applivery-SOAR-Agent.exe`) and packaged as a **WiX v4 MSI installer**
-(`Applivery-SOAR-Agent-amd64.msi` / `-arm64.msi`) that registers itself as
-the `AppliverySOARAgent` Windows Service, running under `LocalSystem`.
+The agent is compiled into three native 64-bit or ARM64 executables and
+packaged as a **WiX v4 MSI installer** (`Applivery-SOAR-Agent-amd64.msi` /
+`-arm64.msi`):
+
+* `Applivery-SOAR-Agent.exe` — the `AppliverySOARAgent` Windows Service
+  (`LocalSystem`) described throughout this README: telemetry, reporting,
+  Custom Device Checks.
+* `Applivery-SOAR-Watchdog.exe` — the `AppliverySOARWatchdog` Windows
+  Service. Exists purely to make the agent harder to switch off — see
+  *Tamper resistance* below.
+* `Applivery-SOAR-Tray.exe` — an unprivileged per-user tray icon, launched
+  by a Scheduled Task at logon (not a service — see *Tray icon* below).
 
 ---
 
@@ -54,6 +62,56 @@ mirror.
   the results in the same report — no separate call, no local state kept
   between cycles. A check created or edited in the dashboard takes effect on
   this device's very next report.
+
+---
+
+## Tamper resistance
+
+A local administrator can always stop a Windows Service outright (`sc stop`,
+`services.msc`, Task Manager's Services tab) — Service Recovery Actions (the
+built-in "restart on failure" configured per service) only fire on a crash,
+never on a clean stop, so they don't help against someone deliberately
+switching the agent off. To raise the bar against that, `AppliverySOARAgent`
+and `AppliverySOARWatchdog` watch **each other**: every 30 seconds (after an
+initial 60s grace period so a normal boot doesn't race both services
+starting up against each other), each asks the Service Control Manager
+whether its partner is running, and restarts it if it's found stopped
+(`internal/svcwatch/svcwatch.go`). Stopping either service alone gets it
+silently restarted by its partner within about 30 seconds; defeating this
+for real requires stopping (or deleting) both within that same short window.
+
+This is a deterrent, not a kernel-mode guarantee — same tier of protection
+commonly shipped by real-world EDR/MDM agents, not a claim that a
+determined local administrator can never disable it. `agent.wxs` stops the
+watchdog before the agent on every install/upgrade/uninstall specifically so
+this mutual-restart logic never fights the installer itself (see the
+comment on the `WatchdogExecutable` component).
+
+## Tray icon
+
+`Applivery-SOAR-Tray.exe` gives a logged-in user a visible, at-a-glance
+signal that device management is active, without needing to open
+`services.msc`. It's launched by a Scheduled Task (`Applivery SOAR Tray`,
+registered by `agent.wxs` via `schtasks.exe` at install time, scoped to the
+built-in `Users` group so it fires for any interactive logon) rather than
+being a service itself — Windows Services run in Session 0, which has had
+no desktop access since Vista's session isolation, so a service can never
+show tray UI directly.
+
+* **The icon itself** swaps automatically between a dark-glyph and
+  light-glyph variant to match the taskbar's own light/dark setting
+  (`HKCU\...\Themes\Personalize\SystemUsesLightTheme`), checked on
+  `WM_SETTINGCHANGE` and on a 60s backstop timer.
+* **Right-click** shows a read-only summary: what's currently being
+  reported (workspace, last report time/result, BitLocker/Firewall status,
+  whether app inventory is included), and this device's Compliance Policy
+  status — compliant/not, risk score and tier, and the applicable policies
+  for this platform with a per-policy OK/VIOLATION mark.
+* **It never touches the service.** The tray process has no registry access
+  to the `ReportSecret` and no HTTP client of its own — it only reads
+  `%ProgramData%\Applivery\SOAR\status.json`, written by the agent service
+  after every report cycle. This keeps the tray simple (a pure reader) and
+  guarantees it always shows exactly what was actually last reported.
 
 ---
 
@@ -178,13 +236,17 @@ git clone https://github.com/raulcnadal/applivery-soar-agent-windows.git
 cd applivery-soar-agent-windows
 
 go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Agent.exe .
+go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Watchdog.exe ./watchdog
+go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Tray.exe ./tray
 
 dotnet tool install --global wix --version "4.*"
 wix build -arch x64 -out Applivery-SOAR-Agent-amd64.msi agent.wxs
 ```
 
-Cross-compile for ARM64 by setting `GOOS=windows GOARCH=arm64` before the
-`go build` step and passing `-arch arm64` to `wix build`. `.github/workflows/build.yml`
+All three exes must be present in the repo root before `wix build` runs —
+`agent.wxs` references all three by filename. Cross-compile for ARM64 by
+setting `GOOS=windows GOARCH=arm64` before each `go build` step and passing
+`-arch arm64` to `wix build`. `.github/workflows/build.yml`
 does exactly this for both architectures on every push, and — on pushes to
 `main` — also publishes both MSIs to the SOAR backend's zero-config download
 endpoint (gated by the `SOAR_AGENT_BUILD_SECRET` repository secret, each
@@ -203,22 +265,42 @@ both MSIs attached.
    Device Data Webhook via your UEM's registry/custom-configuration
    mechanism, targeting `HKLM\SOFTWARE\Policies\Applivery\SOAR`.
 3. **Assign** the app and the configuration profile to your target device
-   groups. The installer registers and starts the `AppliverySOARAgent`
-   service automatically — no reboot required.
+   groups. The installer registers and starts the `AppliverySOARAgent` and
+   `AppliverySOARWatchdog` services, and registers the `Applivery SOAR Tray`
+   Scheduled Task, all automatically — no reboot required. The tray icon
+   itself appears the next time each user logs on (Scheduled Tasks with an
+   `ONLOGON` trigger don't retroactively fire for sessions already open at
+   install time).
 
 ---
 
 ## Troubleshooting
 
 * **Service status:** open `services.msc` and confirm **Applivery SOAR
-  Agent** is `Running` with **Automatic** startup.
-* **Logs:** the agent writes to
-  `%ProgramData%\Applivery\SOAR\agent.log` (i.e.
-  `C:\ProgramData\Applivery\SOAR\agent.log`) whether it's running as the
-  service or interactively — this is the file to pull when troubleshooting,
+  Agent** and **Applivery SOAR Watchdog** are both `Running` with
+  **Automatic** startup. Stopping either one by hand should show it back as
+  `Running` within about 30 seconds (see *Tamper resistance* above) — if it
+  doesn't, check that service's own log (`watchdog.log`) for what it's
+  seeing when it tries.
+* **Tray icon missing:** confirm the Scheduled Task exists and is enabled —
+  `schtasks /Query /TN "Applivery SOAR Tray"` — and that
+  `Applivery-SOAR-Tray.exe` is actually running for the logged-in user
+  (`Get-Process Applivery-SOAR-Tray`). The task only fires at logon, so a
+  tray process killed mid-session won't come back until the next logon.
+* **Logs:** every component writes its own file under
+  `%ProgramData%\Applivery\SOAR\` — `agent.log`, `watchdog.log`, and
+  `tray.log` — same rotate-at-10MB behavior for all three. The agent also
+  writes `status.json` there after every report cycle (what the tray icon
+  reads); if the tray's compliance section shows "unavailable", check
+  `status.json`'s own `compliance.reason` field or `agent.log` for why the
+  `GET /api/device-data/agent-status` call failed (commonly: no Automation
+  Credential configured yet for this workspace under Settings).
+
+  `agent.log` specifically is worth pulling first for most issues, whether
+  the service is running normally or you're testing interactively —
   including over a remote session or via a script pushed through your UEM
-  (`Get-Content 'C:\ProgramData\Applivery\SOAR\agent.log' -Tail 50`). It
-  rotates to `agent.log.old` once it passes 10 MB. Every cycle logs the
+  (`Get-Content 'C:\ProgramData\Applivery\SOAR\agent.log' -Tail 50`). Every
+  cycle logs the
   resolved Managed Configuration (`Config loaded: BaseURL=... WorkspaceSlug=...
   ReportSecret=(set, N chars)...` — the secret itself is never logged) so you
   can immediately tell whether the registry key was actually read, and the

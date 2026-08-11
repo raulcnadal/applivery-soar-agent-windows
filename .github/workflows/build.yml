@@ -38,6 +38,19 @@ jobs:
           GOARCH: amd64
         run: go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Agent.exe .
 
+      # Watchdog + Tray (internal/svcwatch, watchdog/, tray/ — the
+      # anti-tampering + tray-icon feature) are separate `go build` targets,
+      # not part of the root package: each is its own `package main` in its
+      # own directory, producing its own exe that agent.wxs installs
+      # alongside Applivery-SOAR-Agent.exe.
+      - name: Build Go x64 Watchdog + Tray Executables
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Watchdog.exe ./watchdog
+          go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Tray.exe ./tray
+
       - name: Compile x64 MSI
         run: wix build -arch x64 -out Applivery-SOAR-Agent-amd64.msi agent.wxs
 
@@ -89,6 +102,14 @@ jobs:
           GOARCH: arm64
         # This overwrites the x64 exe so WiX picks up the ARM one natively
         run: go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Agent.exe .
+
+      - name: Build Go ARM64 Watchdog + Tray Executables
+        env:
+          GOOS: windows
+          GOARCH: arm64
+        run: |
+          go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Watchdog.exe ./watchdog
+          go build -ldflags="-H windowsgui -s -w" -o Applivery-SOAR-Tray.exe ./tray
 
       - name: Compile ARM64 MSI
         run: wix build -arch arm64 -out Applivery-SOAR-Agent-arm64.msi agent.wxs
