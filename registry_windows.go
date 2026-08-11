@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 
 	"golang.org/x/sys/windows/registry"
@@ -72,5 +73,27 @@ func LoadConfig() Config {
 		config.IntervalSec = int(val)
 	}
 
+	log.Printf(
+		"Config loaded: BaseURL=%s WorkspaceSlug=%s ReportSecret=%s ReportBitLocker=%v ReportFirewall=%v ReportApps=%v IntervalSec=%d",
+		config.BaseURL, maskEmpty(config.WorkspaceSlug), maskSecret(config.ReportSecret), config.ReportBitLocker, config.ReportFirewall, config.ReportApps, config.IntervalSec,
+	)
+
 	return config
+}
+
+// maskEmpty and maskSecret exist purely so LoadConfig's summary line is
+// actually useful for troubleshooting "the script ran but nothing is being
+// reported" — printed every cycle now that config is reloaded each tick
+// (see gatherAndReport in telemetry_windows.go), never the raw secret.
+func maskEmpty(s string) string {
+	if s == "" {
+		return "(not set)"
+	}
+	return s
+}
+func maskSecret(s string) string {
+	if s == "" {
+		return "(not set)"
+	}
+	return fmt.Sprintf("(set, %d chars)", len(s))
 }

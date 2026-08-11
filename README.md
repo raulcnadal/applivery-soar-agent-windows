@@ -212,16 +212,49 @@ both MSIs attached.
 
 * **Service status:** open `services.msc` and confirm **Applivery SOAR
   Agent** is `Running` with **Automatic** startup.
-* **Logs:** the service logs via the standard Go `log` package to its
-  process output — check Windows Event Viewer's Application log, or run the
-  binary interactively (below) for logging directly to the console.
-* **Manual/interactive run** (useful for debugging Managed Configuration —
-  the agent detects it isn't running as a service and logs to the console
-  instead, and `Ctrl+C` shuts it down cleanly):
+* **Logs:** the agent writes to
+  `%ProgramData%\Applivery\SOAR\agent.log` (i.e.
+  `C:\ProgramData\Applivery\SOAR\agent.log`) whether it's running as the
+  service or interactively — this is the file to pull when troubleshooting,
+  including over a remote session or via a script pushed through your UEM
+  (`Get-Content 'C:\ProgramData\Applivery\SOAR\agent.log' -Tail 50`). It
+  rotates to `agent.log.old` once it passes 10 MB. Every cycle logs the
+  resolved Managed Configuration (`Config loaded: BaseURL=... WorkspaceSlug=...
+  ReportSecret=(set, N chars)...` — the secret itself is never logged) so you
+  can immediately tell whether the registry key was actually read, and the
+  HTTP result of each report attempt (`sent successfully -> HTTP Status 200`,
+  or the exact non-2xx status / network error otherwise).
+* **Manual/interactive run** (still useful for watching live output —
+  the agent detects it isn't running as a service and echoes the same log
+  lines to the console in addition to the file, and `Ctrl+C` shuts it down
+  cleanly): stop the service first so both instances aren't reporting at
+  once, then:
 
   ```powershell
+  Stop-Service AppliverySOARAgent
   .\Applivery-SOAR-Agent.exe
   ```
 
 * **"No WorkspaceSlug/ReportSecret" in the logs:** the registry key hasn't
-  been populated yet — see *Configuration Reference* above.
+  been populated yet — see *Configuration Reference* above. Confirm what's
+  actually there with:
+
+  ```powershell
+  Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Applivery\SOAR'
+  ```
+
+* **Config was just pushed but the log still shows the old values:** as of
+  this build, Managed Configuration is re-read from the registry on every
+  report cycle (default hourly) — no service restart needed, it'll pick it
+  up on the next tick. Older builds cached the config once at service start;
+  if you're troubleshooting a device that's been running since before this
+  change shipped, `Restart-Service AppliverySOARAgent` to force an immediate
+  reload rather than waiting out the interval.
+* **Device shows "No security attestation reported" in SOAR despite the
+  agent's own logs showing a successful POST:** the backend matches reports
+  to a device by exact, case-sensitive serial number. Compare the
+  `serialNumber` this agent is sending (visible in the log line for each
+  report, or via `wmic bios get serialnumber` / `Get-CimInstance
+  Win32_BIOS | select SerialNumber`) against the serial Applivery shows for
+  that device in its own inventory — any difference in case, spacing, or
+  formatting will silently prevent the match.
