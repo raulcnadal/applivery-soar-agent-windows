@@ -41,6 +41,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -63,6 +64,7 @@ const (
 	wmRButtonUp     = 0x0205
 	wmApp           = 0x8000
 	wmTrayIcon      = wmApp + 1
+	wmShowCard      = wmApp + 2
 
 	nimAdd    = 0x00000000
 	nimModify = 0x00000001
@@ -429,10 +431,21 @@ func truncate(s string, n int) string {
 func wndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 	switch uint32(msg) {
 	case wmTrayIcon:
+		// Explorer delivers the notification-area callback message
+		// synchronously (Shell_NotifyIcon's uCallbackMessage, dispatched via
+		// SendMessage from inside explorer.exe's own thread) — doing the
+		// card's real work (CreateWindowExW, SetForegroundWindow, GDI) right
+		// here would run all of that nested inside a cross-process call
+		// explorer.exe is blocked waiting on. Post ourselves a message
+		// instead and do the actual work on the next, fully independent
+		// iteration of this thread's own message loop.
 		switch uint32(lParam) {
 		case wmRButtonUp, wmLButtonUp:
-			showCard()
+			procPostMessageW.Call(hwnd, uintptr(wmShowCard), 0, 0)
 		}
+		return 0
+	case wmShowCard:
+		showCard()
 		return 0
 	case wmSettingChange:
 		refreshTrayIcon()
@@ -454,6 +467,20 @@ func wndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 }
 
 func main() {
+	// Win32 windows, message queues, and window procedures are all bound to
+	// the specific OS thread that created them. Go's scheduler is otherwise
+	// free to move this goroutine to a different OS thread at any
+	// preemption point (async preemption has been on by default since Go
+	// 1.14) -- if that happens after we've created windows and started
+	// pumping messages on this thread, GetMessageW ends up polling a
+	// different, empty queue on the new thread while real input piles up
+	// unread on the old one: the process goes fully unresponsive with no
+	// error, exactly matching Windows Error Reporting's AppHangB1 and the
+	// "wait cursor forever" symptom reported against this tray. Locking the
+	// thread here, before any window is created, is the standard, required
+	// fix for hand-rolled Win32 GUI code in Go.
+	runtime.LockOSThread()
+
 	agentlog.Setup("tray")
 	log.Println("Applivery SOAR Tray starting…")
 
