@@ -210,22 +210,25 @@ func extractIcon(name string) (string, error) {
 	return path, nil
 }
 
-// isLightTheme reads the taskbar/tray theme (distinct from the "apps" theme
-// — SystemUsesLightTheme, not AppsUseLightTheme) from the per-user registry.
-// Defaults to light (Windows' historical out-of-box default) if the key or
-// value is missing, e.g. on a Windows Server SKU that doesn't expose this
-// personalization key at all.
+// isLightTheme reads the taskbar/tray theme (SystemUsesLightTheme) from the
+// per-user registry, falling back to the "apps" theme (AppsUseLightTheme)
+// if that specific value isn't present — some Windows editions/versions
+// only expose one of the two. Defaults to light (Windows' historical
+// out-of-box default) only if neither value is readable at all, e.g. on a
+// Windows Server SKU that doesn't expose this personalization key.
 func isLightTheme() bool {
 	k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`, registry.QUERY_VALUE)
 	if err != nil {
 		return true
 	}
 	defer k.Close()
-	v, _, err := k.GetIntegerValue("SystemUsesLightTheme")
-	if err != nil {
-		return true
+	if v, _, err := k.GetIntegerValue("SystemUsesLightTheme"); err == nil {
+		return v != 0
 	}
-	return v != 0
+	if v, _, err := k.GetIntegerValue("AppsUseLightTheme"); err == nil {
+		return v != 0
+	}
+	return true
 }
 
 func loadThemedIcon(light bool) uintptr {
@@ -463,8 +466,6 @@ func main() {
 	var dpiAwarenessContextPerMonitorAwareV2Src int64 = -4
 	dpiAwarenessContextPerMonitorAwareV2 := uintptr(dpiAwarenessContextPerMonitorAwareV2Src)
 	procSetProcessDpiAwarenessContext.Call(dpiAwarenessContextPerMonitorAwareV2)
-
-	loadEmbeddedFonts()
 
 	var err error
 	lightIconPath, err = extractIcon("tray_light.ico")

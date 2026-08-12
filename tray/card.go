@@ -4,19 +4,24 @@
 // The status card shown when a user clicks (or right-clicks — Explorer
 // treats both as "activate" for a notification-area icon) the tray icon.
 // Replaces what used to be a native Win32 popup menu with a small,
-// custom-painted, borderless window: a centered "card" styled after the
-// BlueSky design system used across the rest of SOAR (brand blue #0241E3,
-// Outfit font, rounded surfaces) rather than the grey, native-menu look a
-// plain TrackPopupMenuEx produces. Read-only and purely informational/
-// troubleshooting — there is nothing to click through to (see main.go's
-// doc comment for why: this agent runs on end-user devices, not admin
-// machines, so there's no dashboard link here).
+// custom-painted, borderless window: a centered "card" laid out to match
+// the SOAR web app's own Workspace Profile modal (centered mark, bold
+// title, a pair of pills, bordered brand-blue outline, boxed sections) so
+// the native tray experience reads as the same product as the dashboard.
+// Read-only and purely informational/troubleshooting — there is nothing to
+// click through to (see main.go's doc comment for why: this agent runs on
+// end-user devices, not admin machines, so there's no dashboard link here).
 //
 // Built as a second borderless top-level window (WS_POPUP) rather than a
 // dialog resource or any GUI toolkit, painted with the same raw GDI calls
 // declared in gdi.go — kept content as a flat []drawItem list built once in
 // buildCardContent() and replayed on every WM_PAINT, so the paint handler
-// itself stays trivial and layout logic lives in one place.
+// itself stays trivial and layout logic lives in one place. All pill/label
+// widths below are fixed rather than text-measured: the card has no HDC
+// available at layout time (that only exists during WM_PAINT), and every
+// string that actually varies in length (subtitle, policy names) is drawn
+// with DT_END_ELLIPSIS so Windows does the real, pixel-accurate truncation
+// itself rather than a hand-rolled character-count guess.
 package main
 
 import (
@@ -45,11 +50,13 @@ const (
 
 	waInactive = 0
 
+	diNormal = 0x0003 // DrawIconEx: draw both mask and image
+
 	cardClassName     = "ApplivierySOARCardWndClass"
-	cardCornerRadius  = 14
-	cardPadX          = 20
-	cardPadY          = 18
-	cardRowH          = 26
+	cardCornerRadius  = 16
+	cardPadX          = 24
+	cardPadY          = 20
+	cardRowH          = 28
 	cardMaxPolicyRows = 6
 )
 
@@ -58,6 +65,7 @@ var (
 	procBeginPaint      = moduser32.NewProc("BeginPaint")
 	procEndPaint        = moduser32.NewProc("EndPaint")
 	procGetDpiForSystem = moduser32.NewProc("GetDpiForSystem")
+	procDrawIconEx      = moduser32.NewProc("DrawIconEx")
 )
 
 // Color palette — matches frontend/src/assets/styles/bluesky-tokens.css
@@ -124,18 +132,21 @@ type drawKind int
 const (
 	drawKindText drawKind = iota
 	drawKindPill
-	drawKindDivider
+	drawKindFill // solid rect fill — dividers, section dots, the risk bar
+	drawKindIcon
 )
 
 type drawItem struct {
-	kind    drawKind
-	rect    winRect
-	text    string
-	font    uintptr
-	color   uintptr
-	bgColor uintptr
-	align   uintptr
-	radius  int32
+	kind       drawKind
+	rect       winRect
+	text       string
+	font       uintptr
+	color      uintptr
+	bgColor    uintptr
+	align      uintptr
+	radius     int32
+	outline    bool
+	iconHandle uintptr
 }
 
 var (
@@ -148,6 +159,7 @@ var (
 	cardCursorY         int32
 	cardItems           []drawItem
 	cardCloseRect       winRect
+	cardIconHandle      uintptr
 
 	fontTitle   uintptr
 	fontSection uintptr
@@ -158,6 +170,8 @@ var (
 	fontsReady  bool
 )
 
+const fontFamilyUI = "Segoe UI"
+
 // s DPI-scales a base pixel value against cardScale (see showCard).
 func s(v int32) int32 {
 	return int32(float64(v) * cardScale)
@@ -167,19 +181,39 @@ func ensureCardFonts() {
 	if fontsReady {
 		return
 	}
-	fontTitle = createFont(fontFamilySemiBold, s(17))
-	fontSection = createFont(fontFamilySemiBold, s(12))
-	fontBody = createFont(fontFamilyRegular, s(13))
-	fontBodyMed = createFont(fontFamilyMedium, s(13))
-	fontSmall = createFont(fontFamilyRegular, s(12))
-	fontPill = createFont(fontFamilyMedium, s(12))
+	fontTitle = createFont(fontFamilyUI, s(19), fwBold)
+	fontSection = createFont(fontFamilyUI, s(12), fwSemiBold)
+	fontBody = createFont(fontFamilyUI, s(14), fwRegular)
+	fontBodyMed = createFont(fontFamilyUI, s(14), fwSemiBold)
+	fontSmall = createFont(fontFamilyUI, s(12), fwRegular)
+	fontPill = createFont(fontFamilyUI, s(12), fwSemiBold)
 	fontsReady = true
+}
+
+// loadCardIcon loads the same embedded shield-check .ico (already extracted
+// to a temp file by main.go at startup — see lightIconPath/darkIconPath) at
+// a size suited to the card's header mark, independent of whatever size the
+// notification area itself is using.
+func loadCardIcon(light bool, size int32) uintptr {
+	path := darkIconPath
+	if light {
+		path = lightIconPath
+	}
+	if path == "" {
+		return 0
+	}
+	pathPtr, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return 0
+	}
+	h, _, _ := procLoadImageW.Call(0, uintptr(unsafe.Pointer(pathPtr)), uintptr(imageIcon), uintptr(size), uintptr(size), uintptr(lrLoadFromFile))
+	return h
 }
 
 func addDivider() {
 	y := cardCursorY + s(8)
 	cardItems = append(cardItems, drawItem{
-		kind:    drawKindDivider,
+		kind:    drawKindFill,
 		rect:    winRect{left: s(cardPadX), top: y, right: cardWidthPx - s(cardPadX), bottom: y + 1},
 		bgColor: cardBorderColor(cardIsLight),
 	})
@@ -211,16 +245,21 @@ func addKVRow(label, value string, valueColor uintptr) {
 	cardCursorY += h
 }
 
-func addPillRow(label, pillText string, pillBg, pillFg uintptr) {
+// addPillRow lays out a label (left, ellipsized against whatever room is
+// actually left — not pre-truncated by character count) and a fixed-width
+// filled pill (right). pillW should comfortably fit the longest text this
+// call site ever passes (all of this card's pill texts are short, known
+// words: "OK", "Failed", "Compliant", "N issues", "Violation").
+func addPillRow(label, pillText string, pillBg, pillFg uintptr, pillW int32) {
 	h := s(cardRowH)
-	pillW := s(96)
-	pillH := s(20)
-	labelRect := winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX) - pillW - s(8), bottom: cardCursorY + h}
-	pillTop := cardCursorY + (h-pillH)/2
-	pillRect := winRect{left: cardWidthPx - s(cardPadX) - pillW, top: pillTop, right: cardWidthPx - s(cardPadX), bottom: pillTop + pillH}
+	pw := s(pillW)
+	ph := s(22)
+	labelRect := winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX) - pw - s(10), bottom: cardCursorY + h}
+	pillTop := cardCursorY + (h-ph)/2
+	pillRect := winRect{left: cardWidthPx - s(cardPadX) - pw, top: pillTop, right: cardWidthPx - s(cardPadX), bottom: pillTop + ph}
 	cardItems = append(cardItems,
 		drawItem{kind: drawKindText, rect: labelRect, text: label, font: fontBody, color: cardMutedTextColor(), align: dtLeft | dtVCenter | dtSingleLine | dtEndEllipsis},
-		drawItem{kind: drawKindPill, rect: pillRect, text: pillText, font: fontPill, color: pillFg, bgColor: pillBg, align: dtCenter | dtVCenter | dtSingleLine, radius: s(10)},
+		drawItem{kind: drawKindPill, rect: pillRect, text: pillText, font: fontPill, color: pillFg, bgColor: pillBg, align: dtCenter | dtVCenter | dtSingleLine, radius: s(11)},
 	)
 	cardCursorY += h
 }
@@ -242,26 +281,78 @@ func addBodyLine(text string, muted bool) {
 	cardCursorY += h
 }
 
+// addRiskBar draws a thin horizontal track plus a proportional colored fill
+// (0-100), the same visual language as the Workspace Profile modal's usage
+// bars, colored by compliance risk tier.
+func addRiskBar(score int, barColor uintptr) {
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
+	}
+	trackH := s(6)
+	track := winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX), bottom: cardCursorY + trackH}
+	cardItems = append(cardItems, drawItem{kind: drawKindFill, rect: track, bgColor: cardBorderColor(cardIsLight)})
+	fillW := int32(float64(track.right-track.left) * float64(score) / 100.0)
+	fill := winRect{left: track.left, top: track.top, right: track.left + fillW, bottom: track.bottom}
+	cardItems = append(cardItems, drawItem{kind: drawKindFill, rect: fill, bgColor: barColor})
+	cardCursorY += trackH + s(12)
+}
+
+// addHeroPills draws the centered pair of pills below the title/subtitle —
+// left is an outline pill (border only, no fill, mirroring the web app's
+// "Company" badge), right is a solid-filled status pill.
+func addHeroPills(leftText string, leftW int32, rightText string, rightW int32, rightBg, rightFg uintptr) {
+	h := s(26)
+	gap := s(8)
+	lw, rw := s(leftW), s(rightW)
+	total := lw + gap + rw
+	startX := (cardWidthPx - total) / 2
+	leftRect := winRect{left: startX, top: cardCursorY, right: startX + lw, bottom: cardCursorY + h}
+	rightRect := winRect{left: startX + lw + gap, top: cardCursorY, right: startX + lw + gap + rw, bottom: cardCursorY + h}
+	borderCol := cardBorderColor(cardIsLight)
+	cardItems = append(cardItems,
+		drawItem{kind: drawKindPill, rect: leftRect, text: leftText, font: fontPill, color: cardMutedTextColor(), bgColor: borderCol, align: dtCenter | dtVCenter | dtSingleLine, radius: s(13), outline: true},
+		drawItem{kind: drawKindPill, rect: rightRect, text: rightText, font: fontPill, color: rightFg, bgColor: rightBg, align: dtCenter | dtVCenter | dtSingleLine, radius: s(13)},
+	)
+	cardCursorY += h
+}
+
 // buildCardContent re-reads status.json fresh (see readStatusCache in
 // main.go) and lays out the full row list every time the card is opened —
 // cheap (a handful of small structs), and guarantees the card never shows
 // stale data from a previous open.
 func buildCardContent() {
 	cardItems = cardItems[:0]
-	cardCursorY = 0
+	cardCursorY = s(cardPadY)
 	light := cardIsLight
 
-	headerH := s(44)
-	closeSize := s(28)
+	// Centered header mark, mirroring the Workspace Profile modal's
+	// centered logo/title/subtitle block.
+	iconSize := s(48)
+	iconLeft := (cardWidthPx - iconSize) / 2
+	if cardIconHandle != 0 {
+		cardItems = append(cardItems, drawItem{
+			kind:       drawKindIcon,
+			rect:       winRect{left: iconLeft, top: cardCursorY, right: iconLeft + iconSize, bottom: cardCursorY + iconSize},
+			iconHandle: cardIconHandle,
+		})
+	}
+	cardCursorY += iconSize + s(10)
+
+	titleH := s(24)
 	cardItems = append(cardItems, drawItem{
 		kind:  drawKindText,
-		rect:  winRect{left: s(cardPadX), top: 0, right: cardWidthPx - s(cardPadX) - closeSize, bottom: headerH},
+		rect:  winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX), bottom: cardCursorY + titleH},
 		text:  "Applivery SOAR",
 		font:  fontTitle,
 		color: cardPrimaryTextColor(light),
-		align: dtLeft | dtVCenter | dtSingleLine,
+		align: dtCenter | dtVCenter | dtSingleLine,
 	})
-	cardCloseRect = winRect{left: cardWidthPx - closeSize - s(8), top: s(8), right: cardWidthPx - s(8), bottom: s(8) + closeSize}
+	cardCursorY += titleH + s(2)
+
+	cardCloseRect = winRect{left: cardWidthPx - s(36), top: s(12), right: cardWidthPx - s(12), bottom: s(12) + s(24)}
 	cardItems = append(cardItems, drawItem{
 		kind:  drawKindText,
 		rect:  cardCloseRect,
@@ -270,12 +361,19 @@ func buildCardContent() {
 		color: cardMutedTextColor(),
 		align: dtCenter | dtVCenter | dtSingleLine,
 	})
-	cardCursorY = headerH
 
 	cache, err := readStatusCache()
 	if err != nil || cache == nil {
-		addBodyLine("Waiting for the first report from this device…", true)
-		cardCursorY += s(12)
+		subtitleH := s(18)
+		cardItems = append(cardItems, drawItem{
+			kind:  drawKindText,
+			rect:  winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX), bottom: cardCursorY + subtitleH},
+			text:  "Waiting for the first report from this device",
+			font:  fontSmall,
+			color: cardMutedTextColor(),
+			align: dtCenter | dtVCenter | dtSingleLine | dtEndEllipsis,
+		})
+		cardCursorY += subtitleH + s(16)
 		cardHeight = cardCursorY + s(cardPadY)
 		return
 	}
@@ -284,15 +382,32 @@ func buildCardContent() {
 	if cache.DeviceName != "" {
 		subtitle = cache.DeviceName + " · " + subtitle
 	}
+	subtitleH := s(18)
 	cardItems = append(cardItems, drawItem{
 		kind:  drawKindText,
-		rect:  winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX), bottom: cardCursorY + s(18)},
-		text:  truncate(subtitle, 60),
+		rect:  winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX), bottom: cardCursorY + subtitleH},
+		text:  subtitle,
 		font:  fontSmall,
 		color: cardMutedTextColor(),
-		align: dtLeft | dtVCenter | dtSingleLine | dtEndEllipsis,
+		align: dtCenter | dtVCenter | dtSingleLine | dtEndEllipsis,
 	})
-	cardCursorY += s(18) + s(6)
+	cardCursorY += subtitleH + s(14)
+
+	comp := cache.Compliance
+	statusBg, statusFg, statusText := colSuccess, colWhite, "Compliant"
+	if !comp.Available {
+		statusBg, statusText = colGray400, "Unavailable"
+	} else if !comp.Compliant {
+		n := len(comp.Violations)
+		plural := "s"
+		if n == 1 {
+			plural = ""
+		}
+		statusText = fmt.Sprintf("%d issue%s", n, plural)
+		statusBg = colDanger
+	}
+	addHeroPills("Windows Device", 118, statusText, 118, statusBg, statusFg)
+	cardCursorY += s(16)
 	addDivider()
 
 	addSectionHeader("Reporting")
@@ -325,12 +440,11 @@ func buildCardContent() {
 	if !cache.LastReportOK {
 		lastReportBg, lastReportText = colDanger, "Failed"
 	}
-	addPillRow("Last report ("+formatRelativeTime(cache.LastReportAt)+")", lastReportText, lastReportBg, lastReportFg)
+	addPillRow("Last report ("+formatRelativeTime(cache.LastReportAt)+")", lastReportText, lastReportBg, lastReportFg, 72)
 
 	addDivider()
 	addSectionHeader("Compliance")
 
-	comp := cache.Compliance
 	if !comp.Available {
 		reason := comp.Reason
 		if reason == "" {
@@ -338,32 +452,21 @@ func buildCardContent() {
 		}
 		addBodyLine(reason, true)
 	} else {
-		statusBg, statusFg, statusText := colSuccess, colWhite, "Compliant"
-		if !comp.Compliant {
-			n := len(comp.Violations)
-			plural := "s"
-			if n == 1 {
-				plural = ""
-			}
-			statusText = fmt.Sprintf("%d issue%s", n, plural)
-			statusBg = colDanger
-		}
-		addPillRow("Status", statusText, statusBg, statusFg)
-
 		if comp.RiskScore != nil {
 			tier := ""
 			if comp.RiskTier != nil {
 				tier = *comp.RiskTier
 			}
+			riskColor := tierColor(tier)
 			riskText := fmt.Sprintf("%d", *comp.RiskScore)
 			if tier != "" {
 				riskText += " · " + strings.Title(strings.ToLower(tier))
 			}
-			addKVRow("Risk score", riskText, tierColor(tier))
+			addKVRow("Risk score", riskText, riskColor)
+			addRiskBar(*comp.RiskScore, riskColor)
 		}
 
 		if len(comp.Policies) > 0 {
-			addDivider()
 			addBodyLine(fmt.Sprintf("Policies applied (%d)", len(comp.Policies)), true)
 			violated := make(map[string]bool, len(comp.Violations))
 			for _, v := range comp.Violations {
@@ -378,7 +481,7 @@ func buildCardContent() {
 				if violated[p.ID] {
 					pillText, pillBg = "Violation", colDanger
 				}
-				addPillRow(truncate(p.Name, 26), pillText, pillBg, colWhite)
+				addPillRow(p.Name, pillText, pillBg, colWhite, 76)
 				shown++
 			}
 			if len(comp.Policies) > cardMaxPolicyRows {
@@ -388,10 +491,16 @@ func buildCardContent() {
 	}
 
 	addDivider()
-	addBodyLine("Managed by your organization", true)
-	addBodyLine("Updated "+formatRelativeTime(cache.UpdatedAt), true)
+	footerH := s(16)
+	cardItems = append(cardItems,
+		drawItem{kind: drawKindText, rect: winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX), bottom: cardCursorY + footerH}, text: "MANAGED BY YOUR ORGANIZATION", font: fontSmall, color: cardMutedTextColor(), align: dtCenter | dtVCenter | dtSingleLine},
+	)
+	cardCursorY += footerH + s(2)
+	cardItems = append(cardItems,
+		drawItem{kind: drawKindText, rect: winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX), bottom: cardCursorY + footerH}, text: "Updated " + formatRelativeTime(cache.UpdatedAt), font: fontSmall, color: cardMutedTextColor(), align: dtCenter | dtVCenter | dtSingleLine},
+	)
+	cardCursorY += footerH
 
-	cardCursorY += s(6)
 	cardHeight = cardCursorY + s(cardPadY)
 }
 
@@ -429,16 +538,15 @@ func showCard() {
 	cardIsLight = isLightTheme()
 	cardScale = 1.0
 	// GetDpiForSystem (Windows 10 1607+, no args) reports the system DPI —
-	// combined with the Per-Monitor-V2 process awareness set in main(),
+	// combined with the Per-Monitor-v2 process awareness set in main(),
 	// this keeps the card's fixed-pixel layout correctly sized (not just
-	// unblurred) on the common 125%/150% laptop scaling factors most likely
-	// behind the "icon looks bad" complaint in the first place. Falls back
-	// to 1.0 (100%) if the call fails, matching this repo's general
-	// best-effort/no-crash style for optional Win32 feature calls.
+	// unblurred) on the common 125%/150% laptop scaling factors. Falls back
+	// to 1.0 (100%) if the call fails.
 	if dpi, _, _ := procGetDpiForSystem.Call(); dpi > 0 {
 		cardScale = float64(dpi) / 96.0
 	}
-	cardWidthPx = s(380)
+	cardWidthPx = s(440)
+	cardIconHandle = loadCardIcon(cardIsLight, s(48))
 
 	ensureCardFonts()
 	buildCardContent()
@@ -492,10 +600,18 @@ func paintCard(hdc uintptr) {
 		item := &cardItems[i]
 		r := item.rect
 		switch item.kind {
-		case drawKindDivider:
+		case drawKindFill:
 			fillRectColor(hdc, &r, item.bgColor)
+		case drawKindIcon:
+			w := r.right - r.left
+			h := r.bottom - r.top
+			procDrawIconEx.Call(hdc, uintptr(r.left), uintptr(r.top), item.iconHandle, uintptr(w), uintptr(h), 0, 0, uintptr(diNormal))
 		case drawKindPill:
-			roundRectFill(hdc, &r, item.radius, item.bgColor)
+			if item.outline {
+				roundRectStroke(hdc, &r, item.radius, item.bgColor, s(1))
+			} else {
+				roundRectFill(hdc, &r, item.radius, item.bgColor)
+			}
 			procSelectObject.Call(hdc, item.font)
 			procSetTextColor.Call(hdc, item.color)
 			drawText(hdc, item.text, &r, item.align)
@@ -505,6 +621,10 @@ func paintCard(hdc uintptr) {
 			drawText(hdc, item.text, &r, item.align)
 		}
 	}
+
+	inset := s(1)
+	border := winRect{left: inset, top: inset, right: cardWidthPx - inset, bottom: cardHeight - inset}
+	roundRectStroke(hdc, &border, s(cardCornerRadius)-inset, colBrand, s(2))
 }
 
 // cardWndProc backs the card's own window class — a small, self-contained
@@ -540,6 +660,10 @@ func cardWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		}
 		return 0
 	case wmDestroy:
+		if cardIconHandle != 0 {
+			procDestroyIcon.Call(cardIconHandle)
+			cardIconHandle = 0
+		}
 		cardHwnd = 0
 		return 0
 	}

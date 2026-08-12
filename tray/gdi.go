@@ -6,58 +6,57 @@
 // in main.go. Split into its own file purely to keep main.go (tray icon +
 // message loop) and card.go (the popup card's own logic) from being
 // crowded out by proc-binding boilerplate.
+//
+// Font choice: the card renders with the system "Segoe UI" family rather
+// than an embedded webfont. An earlier revision embedded a converted Outfit
+// TTF via AddFontMemResourceEx + a custom per-weight family name, but with
+// no local Windows/GDI available to this repo's build environment to
+// actually verify it rendered (see the root README's build notes), that
+// path shipped a real, silently-wrong result: GDI's font mapper fell back
+// to a default UI font with no error at any layer. Segoe UI is guaranteed
+// present on every supported Windows version and is exactly what a native
+// Win32 popup should look like anyway — trading a small brand-consistency
+// gap for a card that reliably renders as designed.
 package main
 
 import (
-	"embed"
-	"log"
 	"syscall"
 	"unsafe"
-)
-
-//go:embed fonts/Outfit-Regular.ttf fonts/Outfit-Medium.ttf fonts/Outfit-SemiBold.ttf fonts/Outfit-Bold.ttf
-var fontFS embed.FS
-
-// Font family names baked into the embedded TTFs' own name tables (see the
-// Windows agent repo's font-generation notes — the @fontsource-derived
-// source files had ambiguous/incorrect family names from their variable-font
-// origin, so each weight was re-tagged as its own fully distinct family
-// name before embedding here, specifically so Windows' style-linking can
-// never substitute the wrong weight or fall back to a system font on a
-// near-miss name).
-const (
-	fontFamilyRegular  = "SOAR Outfit Regular"
-	fontFamilyMedium   = "SOAR Outfit Medium"
-	fontFamilySemiBold = "SOAR Outfit SemiBold"
-	fontFamilyBold     = "SOAR Outfit Bold"
 )
 
 var (
 	modgdi32 = syscall.NewLazyDLL("gdi32.dll")
 
-	procCreateCompatibleDC   = modgdi32.NewProc("CreateCompatibleDC")
-	procCreateSolidBrush     = modgdi32.NewProc("CreateSolidBrush")
-	procCreatePen            = modgdi32.NewProc("CreatePen")
-	procSelectObject         = modgdi32.NewProc("SelectObject")
-	procDeleteObject         = modgdi32.NewProc("DeleteObject")
-	procDeleteDC             = modgdi32.NewProc("DeleteDC")
-	procRoundRect            = modgdi32.NewProc("RoundRect")
-	procRectangleGdi         = modgdi32.NewProc("Rectangle")
-	procSetTextColor         = modgdi32.NewProc("SetTextColor")
-	procSetBkMode            = modgdi32.NewProc("SetBkMode")
-	procCreateFontIndirectW  = modgdi32.NewProc("CreateFontIndirectW")
-	procCreateRoundRectRgn   = modgdi32.NewProc("CreateRoundRectRgn")
-	procAddFontMemResourceEx = modgdi32.NewProc("AddFontMemResourceEx")
-	procGetStockObject       = modgdi32.NewProc("GetStockObject")
+	procCreateSolidBrush    = modgdi32.NewProc("CreateSolidBrush")
+	procCreatePen           = modgdi32.NewProc("CreatePen")
+	procSelectObject        = modgdi32.NewProc("SelectObject")
+	procDeleteObject        = modgdi32.NewProc("DeleteObject")
+	procRoundRect           = modgdi32.NewProc("RoundRect")
+	procSetTextColor        = modgdi32.NewProc("SetTextColor")
+	procSetBkMode           = modgdi32.NewProc("SetBkMode")
+	procCreateFontIndirectW = modgdi32.NewProc("CreateFontIndirectW")
+	procCreateRoundRectRgn  = modgdi32.NewProc("CreateRoundRectRgn")
+	procGetStockObject      = modgdi32.NewProc("GetStockObject")
 
-	procFillRect  = moduser32.NewProc("FillRect")
-	procDrawTextW = moduser32.NewProc("DrawTextW")
-	procSetWindowRgn = moduser32.NewProc("SetWindowRgn")
+	procFillRect      = moduser32.NewProc("FillRect")
+	procDrawTextW     = moduser32.NewProc("DrawTextW")
+	procSetWindowRgn  = moduser32.NewProc("SetWindowRgn")
+)
+
+// GetStockObject indices (wingdi.h) — NULL_BRUSH and NULL_PEN are easy to
+// mix up (5 vs 8) and GDI happily accepts either handle in either slot
+// without complaint, so a swap here fails silently as a hollow shape with
+// no error anywhere: SelectObject identifies an object by its own internal
+// type tag, not by which "slot" the caller thinks they're filling, so
+// passing a brush handle where a pen was intended just re-selects the
+// current brush again and leaves the default BLACK_PEN outline in place.
+const (
+	stockNullBrush = 5
+	stockNullPen   = 8
 )
 
 const (
 	transparentBkMode = 1
-	nullBrush         = 5 // GetStockObject index
 	psSolid           = 0
 	dtLeft            = 0x00000000
 	dtCenter          = 0x00000001
@@ -67,7 +66,6 @@ const (
 	dtEndEllipsis     = 0x00008000
 	dtWordBreak       = 0x00000010
 	fwRegular         = 400
-	fwMedium          = 500
 	fwSemiBold        = 600
 	fwBold            = 700
 	defaultCharset    = 1
@@ -105,36 +103,17 @@ func colorref(r, g, b byte) uintptr {
 	return uintptr(uint32(r) | uint32(g)<<8 | uint32(b)<<16)
 }
 
-// loadEmbeddedFonts registers all four embedded Outfit weights as
-// process-private fonts (AddFontMemResourceEx — never touches the system
-// font table, and Windows automatically releases them when this process
-// exits). Best-effort: a failure just means createFont() below falls back
-// to whatever GDI substitutes for an unresolved face name (typically the
-// system default UI font) — a worse-looking card, not a crash.
-func loadEmbeddedFonts() {
-	files := []string{"fonts/Outfit-Regular.ttf", "fonts/Outfit-Medium.ttf", "fonts/Outfit-SemiBold.ttf", "fonts/Outfit-Bold.ttf"}
-	for _, f := range files {
-		data, err := fontFS.ReadFile(f)
-		if err != nil {
-			log.Printf("Could not read embedded font %s: %v", f, err)
-			continue
-		}
-		var numFonts uint32
-		ret, _, callErr := procAddFontMemResourceEx.Call(uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)), 0, uintptr(unsafe.Pointer(&numFonts)))
-		if ret == 0 {
-			log.Printf("AddFontMemResourceEx failed for %s: %v", f, callErr)
-		}
-	}
-}
-
-// createFont builds an HFONT for one of the four embedded families at a
-// given pixel height (negative lfHeight = exact character pixel height,
-// avoiding any point-size/DPI conversion — the caller is expected to have
-// already scaled pxHeight by the card window's own DPI factor).
-func createFont(family string, pxHeight int32) uintptr {
+// createFont builds an HFONT for the given family/pixel-height/weight
+// (negative lfHeight = exact character pixel height, avoiding any
+// point-size/DPI conversion — the caller is expected to have already scaled
+// pxHeight by the card window's own DPI factor). weight is a standard
+// FW_* value (400/600/700/...); Segoe UI ships all of these as proper
+// weight variants of one family, so this is what actually produces bold/
+// semibold text rather than a synthesized-or-substituted font.
+func createFont(family string, pxHeight int32, weight int32) uintptr {
 	var lf logFontW
 	lf.lfHeight = -pxHeight
-	lf.lfWeight = fwRegular
+	lf.lfWeight = weight
 	lf.lfCharSet = defaultCharset
 	lf.lfOutPrecision = outTTPrecis
 	lf.lfClipPrecision = clipDefaultPrecis
@@ -152,9 +131,8 @@ func createFont(family string, pxHeight int32) uintptr {
 	return h
 }
 
-// fillRect fills `r` (a rect already positioned in window-client
-// coordinates) with a solid color — used for both KV-row backgrounds/pills
-// (via roundRect, see card.go) and 1px divider lines.
+// fillRectColor fills `r` (already positioned in window-client coordinates)
+// with a solid color — used for divider lines and the risk-score bar.
 func fillRectColor(hdc uintptr, r *winRect, color uintptr) {
 	brush, _, _ := procCreateSolidBrush.Call(color)
 	if brush == 0 {
@@ -164,22 +142,40 @@ func fillRectColor(hdc uintptr, r *winRect, color uintptr) {
 	procFillRect.Call(hdc, uintptr(unsafe.Pointer(r)), brush)
 }
 
-// roundRectFill draws a filled rounded rectangle (pen-less — NULL_BRUSH's
-// sibling stock object for pens keeps the outline from being drawn at all,
-// so only the fill shows) with the given corner radius, used for pill
-// badges and the card's own rounded background.
+// roundRectFill draws a filled rounded rectangle with no visible outline
+// (a NULL_PEN selected as the current pen, so RoundRect's stroke is
+// invisible and only the brush fill shows) — used for pill badges and the
+// card's own rounded background.
 func roundRectFill(hdc uintptr, r *winRect, radius int32, color uintptr) {
 	brush, _, _ := procCreateSolidBrush.Call(color)
 	if brush == 0 {
 		return
 	}
 	defer procDeleteObject.Call(brush)
-	nullPen, _, _ := procGetStockObject.Call(uintptr(5)) // NULL_PEN = 5
+	nullPen, _, _ := procGetStockObject.Call(uintptr(stockNullPen))
 	oldBrush, _, _ := procSelectObject.Call(hdc, brush)
 	oldPen, _, _ := procSelectObject.Call(hdc, nullPen)
 	procRoundRect.Call(hdc, uintptr(r.left), uintptr(r.top), uintptr(r.right), uintptr(r.bottom), uintptr(radius), uintptr(radius))
 	procSelectObject.Call(hdc, oldBrush)
 	procSelectObject.Call(hdc, oldPen)
+}
+
+// roundRectStroke draws a rounded-rectangle outline only (a NULL_BRUSH
+// selected as the current brush, so RoundRect's fill is invisible and only
+// the colored pen stroke shows) — used for outline-style pills and the
+// card's brand-colored outer border.
+func roundRectStroke(hdc uintptr, r *winRect, radius int32, penColor uintptr, width int32) {
+	pen, _, _ := procCreatePen.Call(uintptr(psSolid), uintptr(width), penColor)
+	if pen == 0 {
+		return
+	}
+	defer procDeleteObject.Call(pen)
+	nullBrush, _, _ := procGetStockObject.Call(uintptr(stockNullBrush))
+	oldPen, _, _ := procSelectObject.Call(hdc, pen)
+	oldBrush, _, _ := procSelectObject.Call(hdc, nullBrush)
+	procRoundRect.Call(hdc, uintptr(r.left), uintptr(r.top), uintptr(r.right), uintptr(r.bottom), uintptr(radius), uintptr(radius))
+	procSelectObject.Call(hdc, oldPen)
+	procSelectObject.Call(hdc, oldBrush)
 }
 
 // drawText draws `s` inside `r` with the given DT_* flags, using whatever
