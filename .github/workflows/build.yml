@@ -46,14 +46,21 @@ jobs:
       # ---------------------------------------------------
       # 1. BUILD x64 MSI
       # ---------------------------------------------------
+      # goversioninfo has no "-arm64" flag (there's only the boolean -64/-arm,
+      # combined to mean the four GOARCH families) -- rather than guess the
+      # right combination by hand, set GOARCH on the invocation itself and
+      # let the tool's own documented auto-detection pick -64/-arm from it,
+      # exactly the way its README describes as the primary, supported path.
       - name: Generate x64 version-info resources
         continue-on-error: true
         shell: bash
+        env:
+          GOARCH: amd64
         run: |
           rm -f resource.syso watchdog/resource.syso tray/resource.syso
-          goversioninfo -64 -o resource.syso versioninfo/agent.json
-          goversioninfo -64 -o watchdog/resource.syso versioninfo/watchdog.json
-          goversioninfo -64 -o tray/resource.syso versioninfo/tray.json
+          goversioninfo -o resource.syso versioninfo/agent.json
+          goversioninfo -o watchdog/resource.syso versioninfo/watchdog.json
+          goversioninfo -o tray/resource.syso versioninfo/tray.json
 
       - name: Build Go x64 Executable
         env:
@@ -129,11 +136,13 @@ jobs:
       - name: Generate ARM64 version-info resources
         continue-on-error: true
         shell: bash
+        env:
+          GOARCH: arm64
         run: |
           rm -f resource.syso watchdog/resource.syso tray/resource.syso
-          goversioninfo -arm64 -o resource.syso versioninfo/agent.json
-          goversioninfo -arm64 -o watchdog/resource.syso versioninfo/watchdog.json
-          goversioninfo -arm64 -o tray/resource.syso versioninfo/tray.json
+          goversioninfo -o resource.syso versioninfo/agent.json
+          goversioninfo -o watchdog/resource.syso versioninfo/watchdog.json
+          goversioninfo -o tray/resource.syso versioninfo/tray.json
 
       - name: Build Go ARM64 Executable
         env:
