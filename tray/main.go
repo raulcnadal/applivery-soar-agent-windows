@@ -4,28 +4,34 @@
 // The Applivery SOAR Tray helper — a small, unprivileged, per-user-session
 // process that shows a persistent notification-area icon so a user always
 // has a visible, informational signal that device management/compliance
-// reporting is active, plus a right-click summary of what's being reported
-// and this device's current Compliance Policy status. It is deliberately
-// NOT a Windows service: services run in Session 0, which has had no
-// desktop/UI access since Windows Vista's session isolation, so a service
-// can never show a tray icon in an interactive user's session directly.
-// Instead the installer registers a Scheduled Task (agent.wxs) that starts
-// this exe once any user logs on.
+// reporting is active, plus a click-to-open status card summarizing what's
+// being reported and this device's current Compliance Policy status. It is
+// deliberately NOT a Windows service: services run in Session 0, which has
+// had no desktop/UI access since Windows Vista's session isolation, so a
+// service can never show a tray icon in an interactive user's session
+// directly. Instead the installer registers a Scheduled Task (agent.wxs)
+// that starts this exe once any user logs on.
 //
 // This process is read-only: it has no registry access to the Managed
 // Configuration secret and no HTTP client of its own. Everything it shows
 // comes from %ProgramData%\Applivery\SOAR\status.json, written by the main
 // AppliverySOARAgent service after every report cycle (status_windows.go /
 // internal/agentstatus in the repo root) — that package's doc comment has
-// the full rationale for the split. Re-read fresh every time the user
-// right-clicks (and on a 60s timer for the tooltip/icon), so the menu is
+// the full rationale for the split. Re-read fresh every time the card is
+// opened (and on a 60s timer for the tooltip/icon/notifications), so it's
 // never more than one report cycle stale.
 //
-// Built entirely on raw syscalls against user32.dll/shell32.dll via the
-// standard library's syscall package — no GUI toolkit dependency, matching
-// this repo's existing style (wmi_windows.go, registry_windows.go) of
-// hand-rolled Win32 calls over a heavier abstraction, and avoiding a new
-// third-party dependency this repo's build can't verify offline.
+// This agent runs on end-user devices, not admin machines — there is
+// deliberately no "open dashboard" link (the dashboard is admin-only) and
+// no way to exit/stop the tray or agent from here (see agent.wxs's
+// tamper-resistance design in the root README).
+//
+// Built entirely on raw syscalls against user32.dll/gdi32.dll/shell32.dll
+// via the standard library's syscall package — no GUI toolkit or WebView2
+// dependency, matching this repo's existing style (wmi_windows.go,
+// registry_windows.go) of hand-rolled Win32 calls, and something this
+// repo's offline build can actually verify (a new dependency's go.sum
+// entries need network access this sandbox doesn't reliably have).
 package main
 
 import (
@@ -65,6 +71,10 @@ const (
 	nifMessage = 0x00000001
 	nifIcon    = 0x00000002
 	nifTip     = 0x00000004
+	nifInfo    = 0x00000010
+
+	niifInfo    = 0x00000001
+	niifWarning = 0x00000002
 
 	imageIcon      = 1
 	lrLoadFromFile = 0x00000010
@@ -72,20 +82,6 @@ const (
 	smCxSmIcon = 49
 	smCySmIcon = 50
 
-	mfString    = 0x00000000
-	mfGrayed    = 0x00000001
-	mfDisabled  = 0x00000002
-	mfSeparator = 0x00000800
-
-	tpmRightAlign  = 0x0008
-	tpmBottomAlign = 0x0020
-	tpmReturnCmd   = 0x0100
-
-	swShowNormal = 1
-
-	cmdInfo           = 9000
-	cmdOpenDashboard  = 1001
-	cmdExit           = 1002
 	trayIconID        = 1
 	refreshTimerID    = 1
 	refreshIntervalMs = 60_000
@@ -96,7 +92,8 @@ var (
 	moduser32   = syscall.NewLazyDLL("user32.dll")
 	modshell32  = syscall.NewLazyDLL("shell32.dll")
 
-	procGetModuleHandleW = modkernel32.NewProc("GetModuleHandleW")
+	procGetModuleHandleW              = modkernel32.NewProc("GetModuleHandleW")
+	procSetProcessDpiAwarenessContext = moduser32.NewProc("SetProcessDpiAwarenessContext")
 
 	procRegisterClassExW = moduser32.NewProc("RegisterClassExW")
 	procCreateWindowExW  = moduser32.NewProc("CreateWindowExW")
@@ -108,19 +105,12 @@ var (
 	procDispatchMessageW = moduser32.NewProc("DispatchMessageW")
 	procLoadImageW       = moduser32.NewProc("LoadImageW")
 	procDestroyIcon      = moduser32.NewProc("DestroyIcon")
-	procCreatePopupMenu  = moduser32.NewProc("CreatePopupMenu")
-	procDestroyMenu      = moduser32.NewProc("DestroyMenu")
-	procAppendMenuW      = moduser32.NewProc("AppendMenuW")
-	procTrackPopupMenuEx = moduser32.NewProc("TrackPopupMenuEx")
 	procSetForegroundWin = moduser32.NewProc("SetForegroundWindow")
-	procPostMessageW     = moduser32.NewProc("PostMessageW")
-	procGetCursorPos     = moduser32.NewProc("GetCursorPos")
 	procGetSystemMetrics = moduser32.NewProc("GetSystemMetrics")
 	procSetTimer         = moduser32.NewProc("SetTimer")
 	procKillTimer        = moduser32.NewProc("KillTimer")
 
 	procShellNotifyIconW = modshell32.NewProc("Shell_NotifyIconW")
-	procShellExecuteW    = modshell32.NewProc("ShellExecuteW")
 )
 
 type point struct{ x, y int32 }
@@ -132,6 +122,12 @@ type msgT struct {
 	lParam  uintptr
 	time    uint32
 	pt      point
+}
+
+// winRect mirrors the Win32 RECT struct — shared by the tray window's own
+// (minimal) needs and card.go's much heavier use for layout/hit-testing.
+type winRect struct {
+	left, top, right, bottom int32
 }
 
 type wndClassExW struct {
@@ -165,10 +161,9 @@ type guid struct {
 // sizes) — Shell_NotifyIconW's version-detection logic keys off cbSize
 // matching one of a few recognized checkpoints, and sizeof(the full struct)
 // is the one guaranteed to be recognized on every version this agent
-// targets. Every field past hIcon/szTip is left at its zero value (this
-// tray never uses balloon notifications or the version/GUID extensions);
-// they're still declared so cbSize (computed via unsafe.Sizeof, never a
-// hand-picked constant) comes out correct.
+// targets. szInfo/szInfoTitle/dwInfoFlags (NIF_INFO) drive the balloon/toast
+// notifications fired on a compliance-violation/recovery transition — see
+// checkComplianceTransition below.
 type notifyIconData struct {
 	cbSize           uint32
 	hWnd             uintptr
@@ -193,6 +188,14 @@ var (
 	darkIconPath    string
 	trayIconHandle  uintptr
 	trayIsLightMode bool
+
+	// lastViolationCount tracks the previous poll's violation count so
+	// checkComplianceTransition can fire a balloon only on an actual
+	// 0->N or N->0 transition, never on every single poll. -1 means "not
+	// observed yet" (this process just started) — deliberately not firing
+	// a notification for whatever state the device happens to already be
+	// in at tray startup, only for changes witnessed while running.
+	lastViolationCount = -1
 )
 
 func extractIcon(name string) (string, error) {
@@ -337,24 +340,51 @@ func removeTrayIcon() {
 	procShellNotifyIconW.Call(uintptr(nimDelete), uintptr(unsafe.Pointer(&data)))
 }
 
-func appendInfo(hMenu uintptr, text string) {
-	p, err := syscall.UTF16PtrFromString(text)
-	if err != nil {
-		return
+// showBalloon fires a classic Shell_NotifyIcon balloon (NIF_INFO) — on
+// modern Windows this is routed through the Action Center like a toast,
+// with zero extra APIs beyond what's already used for the icon/tooltip
+// (NOTIFYICONDATAW already declares these fields). Deliberately not the
+// WinRT ToastNotificationManager route (COM/WinRT interop this repo has no
+// need to take on for a two-message-type notification).
+func showBalloon(title, msg string, infoFlags uint32) {
+	data := notifyIconData{
+		cbSize:      uint32(unsafe.Sizeof(notifyIconData{})),
+		hWnd:        mainHwnd,
+		uID:         trayIconID,
+		uFlags:      nifInfo,
+		dwInfoFlags: infoFlags,
 	}
-	procAppendMenuW.Call(hMenu, uintptr(mfString|mfGrayed|mfDisabled), uintptr(cmdInfo), uintptr(unsafe.Pointer(p)))
+	copyToUTF16Buf(data.szInfo[:], msg)
+	copyToUTF16Buf(data.szInfoTitle[:], title)
+	procShellNotifyIconW.Call(uintptr(nimModify), uintptr(unsafe.Pointer(&data)))
 }
 
-func appendSeparator(hMenu uintptr) {
-	procAppendMenuW.Call(hMenu, uintptr(mfSeparator), 0, 0)
+func pluralPolicy(n int) string {
+	if n == 1 {
+		return "policy"
+	}
+	return "policies"
 }
 
-func appendAction(hMenu uintptr, id uintptr, text string) {
-	p, err := syscall.UTF16PtrFromString(text)
-	if err != nil {
+// checkComplianceTransition compares this poll's violation count against
+// the previous one and fires a balloon on a real 0<->N transition — never
+// on every poll (which would make status.json's normal per-cycle rewrite
+// spam a notification even when nothing about compliance actually changed).
+func checkComplianceTransition(cache *agentstatus.StatusCache) {
+	if cache == nil || !cache.Compliance.Available {
 		return
 	}
-	procAppendMenuW.Call(hMenu, uintptr(mfString), id, uintptr(unsafe.Pointer(p)))
+	count := len(cache.Compliance.Violations)
+	if lastViolationCount == -1 {
+		lastViolationCount = count
+		return
+	}
+	if count > 0 && lastViolationCount == 0 {
+		showBalloon("Compliance issue detected", fmt.Sprintf("%d %s now failing on this device.", count, pluralPolicy(count)), niifWarning)
+	} else if count == 0 && lastViolationCount > 0 {
+		showBalloon("Compliance restored", "This device is compliant with all applicable policies again.", niifInfo)
+	}
+	lastViolationCount = count
 }
 
 func formatRelativeTime(rfc3339 string) string {
@@ -393,142 +423,12 @@ func truncate(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-func dashboardURL(cache *agentstatus.StatusCache) string {
-	if cache != nil && cache.BaseURL != "" {
-		return cache.BaseURL
-	}
-	return "https://soar.mi-labs.es"
-}
-
-func openURL(u string) {
-	if u == "" {
-		return
-	}
-	op, err := syscall.UTF16PtrFromString("open")
-	if err != nil {
-		return
-	}
-	file, err := syscall.UTF16PtrFromString(u)
-	if err != nil {
-		return
-	}
-	procShellExecuteW.Call(0, uintptr(unsafe.Pointer(op)), uintptr(unsafe.Pointer(file)), 0, 0, uintptr(swShowNormal))
-}
-
-// showContextMenu builds the right-click menu fresh from status.json every
-// time — see this file's package doc for why that's deliberate. Everything
-// except "Open SOAR Dashboard"/"Exit tray icon" is a disabled (MF_GRAYED |
-// MF_DISABLED) informational line: this menu is a status readout, not a
-// control surface for the agent itself (stopping/starting the underlying
-// service is intentionally not exposed here).
-func showContextMenu() {
-	hMenu, _, _ := procCreatePopupMenu.Call()
-	if hMenu == 0 {
-		return
-	}
-	defer procDestroyMenu.Call(hMenu)
-
-	cache, cacheErr := readStatusCache()
-
-	appendInfo(hMenu, "Applivery SOAR Agent")
-	appendSeparator(hMenu)
-
-	if cacheErr != nil || cache == nil {
-		appendInfo(hMenu, "No data reported yet")
-		appendInfo(hMenu, "Waiting for the first report cycle…")
-	} else {
-		if cache.WorkspaceSlug != "" {
-			appendInfo(hMenu, fmt.Sprintf("Workspace: %s", cache.WorkspaceSlug))
-		}
-		reportLine := fmt.Sprintf("Last report: %s", formatRelativeTime(cache.LastReportAt))
-		if cache.LastReportOK {
-			reportLine += " (OK)"
-		} else {
-			reportLine += " (failed)"
-		}
-		appendInfo(hMenu, reportLine)
-
-		if cache.ReportedBitLocker && cache.BitLockerStatus != nil {
-			appendInfo(hMenu, fmt.Sprintf("BitLocker: %s", onOff(*cache.BitLockerStatus)))
-		}
-		if cache.ReportedFirewall && cache.FirewallEnabled != nil {
-			appendInfo(hMenu, fmt.Sprintf("Firewall: %s", onOff(*cache.FirewallEnabled)))
-		}
-		if cache.ReportedApps {
-			appendInfo(hMenu, "App inventory: reported")
-		}
-
-		appendSeparator(hMenu)
-
-		comp := cache.Compliance
-		if !comp.Available {
-			appendInfo(hMenu, "Compliance: unavailable")
-			if comp.Reason != "" {
-				appendInfo(hMenu, truncate(comp.Reason, 60))
-			}
-		} else {
-			if comp.Compliant {
-				appendInfo(hMenu, "Compliance: Compliant")
-			} else {
-				appendInfo(hMenu, fmt.Sprintf("Compliance: %d issue(s) found", len(comp.Violations)))
-			}
-			if comp.RiskScore != nil && comp.RiskTier != nil {
-				appendInfo(hMenu, fmt.Sprintf("Risk score: %d (%s)", *comp.RiskScore, *comp.RiskTier))
-			}
-			if len(comp.Policies) > 0 {
-				appendSeparator(hMenu)
-				appendInfo(hMenu, fmt.Sprintf("Policies applied (%d):", len(comp.Policies)))
-				violated := make(map[string]bool, len(comp.Violations))
-				for _, v := range comp.Violations {
-					violated[v.PolicyID] = true
-				}
-				const maxShown = 6
-				shown := 0
-				for _, p := range comp.Policies {
-					if shown >= maxShown {
-						break
-					}
-					mark := "OK"
-					if violated[p.ID] {
-						mark = "VIOLATION"
-					}
-					appendInfo(hMenu, fmt.Sprintf("  %s — %s", truncate(p.Name, 32), mark))
-					shown++
-				}
-				if len(comp.Policies) > shown {
-					appendInfo(hMenu, fmt.Sprintf("  …and %d more", len(comp.Policies)-shown))
-				}
-			}
-		}
-	}
-
-	appendSeparator(hMenu)
-	appendAction(hMenu, cmdOpenDashboard, "Open SOAR Dashboard")
-	appendAction(hMenu, cmdExit, "Exit tray icon")
-
-	var pt point
-	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
-	procSetForegroundWin.Call(mainHwnd)
-
-	ret, _, _ := procTrackPopupMenuEx.Call(hMenu, uintptr(tpmReturnCmd|tpmRightAlign|tpmBottomAlign), uintptr(pt.x), uintptr(pt.y), mainHwnd, 0)
-	// The classic "menu doesn't disappear when you click elsewhere" fix —
-	// TrackPopupMenu(Ex)'s own documented workaround.
-	procPostMessageW.Call(mainHwnd, 0, 0, 0)
-
-	switch uint32(ret) {
-	case cmdOpenDashboard:
-		openURL(dashboardURL(cache))
-	case cmdExit:
-		procDestroyWindow.Call(mainHwnd)
-	}
-}
-
 func wndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 	switch uint32(msg) {
 	case wmTrayIcon:
 		switch uint32(lParam) {
 		case wmRButtonUp, wmLButtonUp:
-			showContextMenu()
+			showCard()
 		}
 		return 0
 	case wmSettingChange:
@@ -536,6 +436,9 @@ func wndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		return 0
 	case wmTimer:
 		refreshTrayIcon()
+		if cache, err := readStatusCache(); err == nil {
+			checkComplianceTransition(cache)
+		}
 		return 0
 	case wmDestroy:
 		procKillTimer.Call(mainHwnd, uintptr(refreshTimerID))
@@ -550,6 +453,17 @@ func wndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 func main() {
 	agentlog.Setup("tray")
 	log.Println("Applivery SOAR Tray starting…")
+
+	// Best-effort: makes GetSystemMetrics/window sizing report true physical
+	// pixels instead of being silently bitmap-scaled by Windows' DPI
+	// virtualization shim for unmanifested processes — the likely root
+	// cause of a blurry tray icon/card on a scaled display. Available since
+	// Windows 10 1703; a failure here (older Windows) just means this
+	// process falls back to system-DPI-aware behavior, not a crash.
+	dpiAwarenessContextPerMonitorAwareV2 := uintptr(int64(-4))
+	procSetProcessDpiAwarenessContext.Call(dpiAwarenessContextPerMonitorAwareV2)
+
+	loadEmbeddedFonts()
 
 	var err error
 	lightIconPath, err = extractIcon("tray_light.ico")

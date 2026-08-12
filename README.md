@@ -98,15 +98,33 @@ being a service itself — Windows Services run in Session 0, which has had
 no desktop access since Vista's session isolation, so a service can never
 show tray UI directly.
 
-* **The icon itself** swaps automatically between a dark-glyph and
-  light-glyph variant to match the taskbar's own light/dark setting
-  (`HKCU\...\Themes\Personalize\SystemUsesLightTheme`), checked on
-  `WM_SETTINGCHANGE` and on a 60s backstop timer.
-* **Right-click** shows a read-only summary: what's currently being
-  reported (workspace, last report time/result, BitLocker/Firewall status,
-  whether app inventory is included), and this device's Compliance Policy
-  status — compliant/not, risk score and tier, and the applicable policies
-  for this platform with a per-policy OK/VIOLATION mark.
+* **The icon itself** is Solar's `shield-check` glyph (matching the icon set
+  used throughout the SOAR web app), swapping automatically between a
+  dark-glyph and light-glyph variant to match the taskbar's own light/dark
+  setting (`HKCU\...\Themes\Personalize\SystemUsesLightTheme`), checked on
+  `WM_SETTINGCHANGE` and on a 60s backstop timer. The process opts into
+  Per-Monitor-v2 DPI awareness (`SetProcessDpiAwarenessContext`) on startup
+  so the icon renders crisp — not blurred/upscaled — on scaled displays.
+* **Click** (left or right — both open the same view) shows a status card:
+  a small, centered, BlueSky-styled window (brand blue, rounded corners,
+  the Outfit font embedded directly into the binary — no install/network
+  needed) rather than a native popup menu. It's read-only and purely
+  informational/troubleshooting: what's currently being reported (workspace,
+  last report time/result, BitLocker/Firewall status, whether app inventory
+  is included), and this device's Compliance Policy status — compliant/not,
+  risk score and tier, and the applicable policies for this platform with a
+  per-policy OK/Violation pill. There is deliberately no link to the SOAR
+  dashboard and no way to exit the tray from here — this agent runs on
+  end-user devices, not admin machines, and the tray is part of the same
+  tamper-resistance story as the watchdog service above. Dismiss with the
+  close button, `Esc`, or by clicking elsewhere.
+* **Notifications.** The tray also raises a Windows balloon/Action Center
+  notification when this device's compliance state actually changes state
+  while the tray is running: one or more policy violations newly detected,
+  or a full recovery back to compliant. It only fires on that transition
+  (not on every poll), and only for changes observed after the tray starts
+  — it doesn't notify about whatever state the device happened to already
+  be in at startup.
 * **It never touches the service.** The tray process has no registry access
   to the `ReportSecret` and no HTTP client of its own — it only reads
   `%ProgramData%\Applivery\SOAR\status.json`, written by the agent service
