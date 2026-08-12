@@ -33,6 +33,7 @@ import (
 
 const (
 	wmPaint       = 0x000F
+	wmClose       = 0x0010
 	wmLButtonDown = 0x0201
 	wmKeyDown     = 0x0100
 	wmActivate    = 0x0006
@@ -66,6 +67,7 @@ var (
 	procEndPaint        = moduser32.NewProc("EndPaint")
 	procGetDpiForSystem = moduser32.NewProc("GetDpiForSystem")
 	procDrawIconEx      = moduser32.NewProc("DrawIconEx")
+	procPostMessageW    = moduser32.NewProc("PostMessageW")
 )
 
 // Color palette — matches frontend/src/assets/styles/bluesky-tokens.css
@@ -264,6 +266,30 @@ func addPillRow(label, pillText string, pillBg, pillFg uintptr, pillW int32) {
 	cardCursorY += h
 }
 
+// addPolicyRow stacks the policy name on its own full-width line (ellipsized
+// against the whole card width, not squeezed alongside a pill) with the
+// OK/Violation pill on a second line below it — policy names in practice
+// are often long regulatory citations ("Esquema Nacional de Seguridad
+// (ENS, RD 311/2022)"), and giving the name a shared row with a pill left
+// too little room for DT_END_ELLIPSIS to show much of anything.
+func addPolicyRow(name, pillText string, pillBg, pillFg uintptr) {
+	nameH := s(20)
+	nameRect := winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX), bottom: cardCursorY + nameH}
+	cardItems = append(cardItems, drawItem{
+		kind: drawKindText, rect: nameRect, text: name, font: fontBody,
+		color: cardPrimaryTextColor(cardIsLight), align: dtLeft | dtVCenter | dtSingleLine | dtEndEllipsis,
+	})
+	cardCursorY += nameH + s(4)
+
+	pw, ph := s(78), s(20)
+	pillRect := winRect{left: s(cardPadX), top: cardCursorY, right: s(cardPadX) + pw, bottom: cardCursorY + ph}
+	cardItems = append(cardItems, drawItem{
+		kind: drawKindPill, rect: pillRect, text: pillText, font: fontPill,
+		color: pillFg, bgColor: pillBg, align: dtCenter | dtVCenter | dtSingleLine, radius: s(10),
+	})
+	cardCursorY += ph + s(10)
+}
+
 func addBodyLine(text string, muted bool) {
 	h := s(cardRowH)
 	color := cardPrimaryTextColor(cardIsLight)
@@ -327,19 +353,6 @@ func buildCardContent() {
 	cardItems = cardItems[:0]
 	cardCursorY = s(cardPadY)
 	light := cardIsLight
-
-	// Centered header mark, mirroring the Workspace Profile modal's
-	// centered logo/title/subtitle block.
-	iconSize := s(48)
-	iconLeft := (cardWidthPx - iconSize) / 2
-	if cardIconHandle != 0 {
-		cardItems = append(cardItems, drawItem{
-			kind:       drawKindIcon,
-			rect:       winRect{left: iconLeft, top: cardCursorY, right: iconLeft + iconSize, bottom: cardCursorY + iconSize},
-			iconHandle: cardIconHandle,
-		})
-	}
-	cardCursorY += iconSize + s(10)
 
 	titleH := s(24)
 	cardItems = append(cardItems, drawItem{
@@ -481,7 +494,7 @@ func buildCardContent() {
 				if violated[p.ID] {
 					pillText, pillBg = "Violation", colDanger
 				}
-				addPillRow(p.Name, pillText, pillBg, colWhite, 76)
+				addPolicyRow(p.Name, pillText, pillBg, colWhite)
 				shown++
 			}
 			if len(comp.Policies) > cardMaxPolicyRows {
@@ -546,7 +559,6 @@ func showCard() {
 		cardScale = float64(dpi) / 96.0
 	}
 	cardWidthPx = s(440)
-	cardIconHandle = loadCardIcon(cardIsLight, s(48))
 
 	ensureCardFonts()
 	buildCardContent()
@@ -632,6 +644,17 @@ func paintCard(hdc uintptr) {
 // auto-dismiss when the card loses foreground focus (mirrors how the old
 // native popup menu dismissed on click-away, so the interaction still feels
 // familiar even though the underlying implementation changed completely).
+//
+// Every dismiss path posts WM_CLOSE rather than calling DestroyWindow
+// directly. DestroyWindow tears the window down synchronously, including
+// dispatching WM_DESTROY to this same wndproc before returning -- calling
+// it from inside WM_ACTIVATE in particular is a well-known Win32 pitfall:
+// WM_ACTIVATE fires while the window manager's own activation handling is
+// still on the call stack (showCard's ShowWindow/SetForegroundWindow are
+// what triggers it), and re-entering DestroyWindow from there was hanging
+// the whole process ("not responding") rather than merely misbehaving.
+// Posting WM_CLOSE instead defers the actual teardown to its own, later,
+// non-reentrant iteration of the message loop.
 func cardWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 	switch uint32(msg) {
 	case wmPaint:
@@ -646,18 +669,21 @@ func cardWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		x := int32(int16(uint32(lParam) & 0xFFFF))
 		y := int32(int16(uint32(lParam) >> 16))
 		if x >= cardCloseRect.left && x <= cardCloseRect.right && y >= cardCloseRect.top && y <= cardCloseRect.bottom {
-			procDestroyWindow.Call(hwnd)
+			procPostMessageW.Call(hwnd, uintptr(wmClose), 0, 0)
 		}
 		return 0
 	case wmKeyDown:
 		if wParam == vkEscape {
-			procDestroyWindow.Call(hwnd)
+			procPostMessageW.Call(hwnd, uintptr(wmClose), 0, 0)
 		}
 		return 0
 	case wmActivate:
 		if uint32(wParam)&0xFFFF == waInactive {
-			procDestroyWindow.Call(hwnd)
+			procPostMessageW.Call(hwnd, uintptr(wmClose), 0, 0)
 		}
+		return 0
+	case wmClose:
+		procDestroyWindow.Call(hwnd)
 		return 0
 	case wmDestroy:
 		if cardIconHandle != 0 {
