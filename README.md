@@ -15,8 +15,9 @@ packaged as a **WiX v4 MSI installer** (`Applivery-SOAR-Agent-amd64.msi` /
   (`LocalSystem`) described throughout this README: telemetry, reporting,
   Custom Device Checks.
 * `Applivery-SOAR-Watchdog.exe` — the `AppliverySOARWatchdog` Windows
-  Service. Exists purely to make the agent harder to switch off — see
-  *Tamper resistance* below.
+  Service. Exists primarily to make the agent harder to switch off (see
+  *Tamper resistance* below) — it also polls for the tray helper process
+  below and silently re-launches it if it's gone missing mid-session.
 * `Applivery-SOAR-Tray.exe` — an unprivileged per-user tray icon, launched
   by a Scheduled Task at logon (not a service — see *Tray icon* below).
 
@@ -105,17 +106,21 @@ show tray UI directly.
   `WM_SETTINGCHANGE` and on a 60s backstop timer. The process opts into
   Per-Monitor-v2 DPI awareness (`SetProcessDpiAwarenessContext`) on startup
   so the icon renders crisp — not blurred/upscaled — on scaled displays.
-* **Click** (left or right — both open the same view) shows a status card:
-  a small, centered, BlueSky-styled window (brand blue, rounded corners,
-  the Outfit font embedded directly into the binary — no install/network
-  needed) rather than a native popup menu. It's read-only and purely
-  informational/troubleshooting: what's currently being reported (workspace,
-  last report time/result, BitLocker/Firewall status, whether app inventory
-  is included), and this device's Compliance Policy status — compliant/not,
-  risk score and tier, and the applicable policies for this platform with a
-  per-policy OK/Violation pill. There is deliberately no link to the SOAR
-  dashboard and no way to exit the tray from here — this agent runs on
-  end-user devices, not admin machines, and the tray is part of the same
+* **Click** (left or right — both open the same view) shows a status card: a
+  BlueSky-styled window (brand blue, rounded corners, the system Segoe UI
+  font) rather than a native popup menu, opened centered on screen but
+  freely drag-movable afterward (click anywhere on the card except the close
+  button and drag — standard Win32 window-move behavior, not a custom drag
+  implementation). It's read-only and purely informational/troubleshooting:
+  what's currently being reported (workspace, last report time/result,
+  BitLocker/Firewall status, whether app inventory is included), and this
+  device's Compliance Policy status — compliant/not, risk score and tier,
+  and the applicable policies for this platform with a per-policy
+  OK/Violation pill. The card sizes itself to whatever it needs to show
+  (long policy names grow it wider rather than truncating, up to 90% of the
+  screen width) rather than a fixed size. There is deliberately no link to
+  the SOAR dashboard and no way to exit the tray from here — this agent runs
+  on end-user devices, not admin machines, and the tray is part of the same
   tamper-resistance story as the watchdog service above. Dismiss with the
   close button, `Esc`, or by clicking elsewhere.
 * **Notifications.** The tray also raises a Windows balloon/Action Center
@@ -303,8 +308,13 @@ both MSIs attached.
 * **Tray icon missing:** confirm the Scheduled Task exists and is enabled —
   `schtasks /Query /TN "Applivery SOAR Tray"` — and that
   `Applivery-SOAR-Tray.exe` is actually running for the logged-in user
-  (`Get-Process Applivery-SOAR-Tray`). The task only fires at logon, so a
-  tray process killed mid-session won't come back until the next logon.
+  (`Get-Process Applivery-SOAR-Tray`). The task itself only fires at logon,
+  but **Applivery SOAR Watchdog** also polls for the tray process every 30
+  seconds and silently re-runs the Scheduled Task if it's found missing (see
+  `internal/svcwatch/tray.go`) — a tray process killed, crashed, or closed
+  mid-session should reappear within that window on its own; it should only
+  actually stay gone if nobody's logged on to the console, or the Watchdog
+  service itself isn't running.
 * **Logs:** every component writes its own file under
   `%ProgramData%\Applivery\SOAR\` — `agent.log`, `watchdog.log`, and
   `tray.log` — same rotate-at-10MB behavior for all three. The agent also

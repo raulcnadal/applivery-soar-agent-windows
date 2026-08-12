@@ -74,6 +74,16 @@ func EnsureRunning(serviceName string) {
 // (each briefly sees the other as "not running yet" and tries to
 // force-start it while SCM is already bringing it up on its own).
 func Monitor(partnerServiceName string, interval, graceDelay time.Duration, stopChan <-chan struct{}) {
+	MonitorFunc(func() { EnsureRunning(partnerServiceName) }, interval, graceDelay, stopChan)
+}
+
+// MonitorFunc is Monitor's generic counterpart: the same start-delay,
+// interval, stop-channel polling loop, but driven by an arbitrary check
+// function instead of always being "is this SCM service running". Monitor
+// itself is now just MonitorFunc with EnsureRunning bound in as the check —
+// added so EnsureTrayRunning (tray.go, same package) can reuse this exact
+// polling loop even though the tray helper has no SCM state to query.
+func MonitorFunc(check func(), interval, graceDelay time.Duration, stopChan <-chan struct{}) {
 	select {
 	case <-time.After(graceDelay):
 	case <-stopChan:
@@ -83,11 +93,11 @@ func Monitor(partnerServiceName string, interval, graceDelay time.Duration, stop
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	EnsureRunning(partnerServiceName)
+	check()
 	for {
 		select {
 		case <-ticker.C:
-			EnsureRunning(partnerServiceName)
+			check()
 		case <-stopChan:
 			return
 		}

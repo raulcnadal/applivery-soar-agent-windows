@@ -34,13 +34,16 @@ var (
 	procRoundRect           = modgdi32.NewProc("RoundRect")
 	procSetTextColor        = modgdi32.NewProc("SetTextColor")
 	procSetBkMode           = modgdi32.NewProc("SetBkMode")
-	procCreateFontIndirectW = modgdi32.NewProc("CreateFontIndirectW")
-	procCreateRoundRectRgn  = modgdi32.NewProc("CreateRoundRectRgn")
-	procGetStockObject      = modgdi32.NewProc("GetStockObject")
+	procCreateFontIndirectW    = modgdi32.NewProc("CreateFontIndirectW")
+	procCreateRoundRectRgn     = modgdi32.NewProc("CreateRoundRectRgn")
+	procGetStockObject         = modgdi32.NewProc("GetStockObject")
+	procGetTextExtentPoint32W  = modgdi32.NewProc("GetTextExtentPoint32W")
 
-	procFillRect      = moduser32.NewProc("FillRect")
-	procDrawTextW     = moduser32.NewProc("DrawTextW")
-	procSetWindowRgn  = moduser32.NewProc("SetWindowRgn")
+	procFillRect     = moduser32.NewProc("FillRect")
+	procDrawTextW    = moduser32.NewProc("DrawTextW")
+	procSetWindowRgn = moduser32.NewProc("SetWindowRgn")
+	procGetDC        = moduser32.NewProc("GetDC")
+	procReleaseDC    = moduser32.NewProc("ReleaseDC")
 )
 
 // GetStockObject indices (wingdi.h) — NULL_BRUSH and NULL_PEN are easy to
@@ -187,4 +190,29 @@ func drawText(hdc uintptr, s string, r *winRect, flags uintptr) {
 		return
 	}
 	procDrawTextW.Call(hdc, uintptr(unsafe.Pointer(&u[0])), uintptr(len(u)-1), uintptr(unsafe.Pointer(r)), flags)
+}
+
+// sizeT mirrors the Win32 SIZE struct — GetTextExtentPoint32W's output
+// parameter.
+type sizeT struct{ cx, cy int32 }
+
+// measureTextWidthPx returns the pixel width `text` would occupy if drawn
+// with `font`, using GetTextExtentPoint32W against `hdc` (the caller's
+// responsibility to obtain and release — see measureCardScreenDC in
+// card.go). This is the same glyph-metrics math DrawText itself uses
+// internally, so a width computed here and then used to size the window
+// beforehand guarantees DrawText/DT_END_ELLIPSIS never actually needs to
+// truncate anything: the card was already sized to fit. Restores hdc's
+// previously-selected font before returning, since callers may reuse the
+// same DC to measure several strings in different fonts back to back.
+func measureTextWidthPx(hdc uintptr, font uintptr, text string) int32 {
+	old, _, _ := procSelectObject.Call(hdc, font)
+	defer procSelectObject.Call(hdc, old)
+	u, err := syscall.UTF16FromString(text)
+	if err != nil {
+		return 0
+	}
+	var size sizeT
+	procGetTextExtentPoint32W.Call(hdc, uintptr(unsafe.Pointer(&u[0])), uintptr(len(u)-1), uintptr(unsafe.Pointer(&size)))
+	return size.cx
 }

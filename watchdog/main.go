@@ -14,7 +14,11 @@
 //
 // Deliberately minimal: no telemetry, no HTTP, no Managed Configuration —
 // just svc scaffolding (mirroring the main agent's own main.go) around
-// internal/svcwatch's polling loop.
+// internal/svcwatch's polling loop. As of the tray-supervision addition
+// below, it also polls for the per-user tray helper process (which, unlike
+// the agent, isn't a service this watchdog can query via SCM) and re-runs
+// its Scheduled Task if it's gone missing mid-session — see
+// internal/svcwatch/tray.go for the full rationale.
 package main
 
 import (
@@ -34,6 +38,9 @@ const (
 	watchdogServiceName = "AppliverySOARWatchdog"
 	agentServiceName    = "AppliverySOARAgent"
 
+	trayTaskName = "Applivery SOAR Tray" // must match agent.wxs's RegisterTrayTask /TN
+	trayExeName  = "Applivery-SOAR-Tray.exe"
+
 	pollInterval = 30 * time.Second
 	graceDelay   = 60 * time.Second
 )
@@ -47,6 +54,7 @@ func (m *watchdogService) Execute(args []string, r <-chan svc.ChangeRequest, cha
 
 	stopChan := make(chan struct{})
 	go svcwatch.Monitor(agentServiceName, pollInterval, graceDelay, stopChan)
+	go svcwatch.MonitorFunc(func() { svcwatch.EnsureTrayRunning(trayTaskName, trayExeName) }, pollInterval, graceDelay, stopChan)
 
 	for c := range r {
 		switch c.Cmd {
@@ -78,6 +86,7 @@ func main() {
 		log.Println("Running interactively (Debug Mode)")
 		stopChan := make(chan struct{})
 		go svcwatch.Monitor(agentServiceName, pollInterval, graceDelay, stopChan)
+		go svcwatch.MonitorFunc(func() { svcwatch.EnsureTrayRunning(trayTaskName, trayExeName) }, pollInterval, graceDelay, stopChan)
 
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)

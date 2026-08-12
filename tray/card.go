@@ -37,8 +37,21 @@ const (
 	wmLButtonDown = 0x0201
 	wmKeyDown     = 0x0100
 	wmActivate    = 0x0006
+	wmNcHitTest   = 0x0084
 
 	vkEscape = 0x1B
+
+	// WM_NCHITTEST return codes relevant here: HTCLIENT (the default, "this
+	// is ordinary client area") and HTCAPTION ("treat this like a title bar
+	// for dragging purposes"). Returning HTCAPTION from a spot that isn't a
+	// real caption is the standard, well-known technique borderless/custom-
+	// chrome apps use to make an arbitrary region drag-movable — DefWindowProc
+	// starts its normal window-move loop off the back of it exactly as if the
+	// window had a real WS_CAPTION, with zero extra plumbing needed on our
+	// side (no manual mouse-capture/WM_MOUSEMOVE tracking, no owner-drawn
+	// caption button hit-testing beyond the exclusion below).
+	htClient  = 1
+	htCaption = 2
 
 	wsPopup        = 0x80000000
 	wsExToolWindow = 0x00000080
@@ -59,6 +72,7 @@ const (
 	cardPadY          = 20
 	cardRowH          = 28
 	cardMaxPolicyRows = 6
+	cardMinWidth      = 440
 )
 
 var (
@@ -68,6 +82,7 @@ var (
 	procGetDpiForSystem = moduser32.NewProc("GetDpiForSystem")
 	procDrawIconEx      = moduser32.NewProc("DrawIconEx")
 	procPostMessageW    = moduser32.NewProc("PostMessageW")
+	procScreenToClient  = moduser32.NewProc("ScreenToClient")
 )
 
 // Color palette — matches frontend/src/assets/styles/bluesky-tokens.css
@@ -266,28 +281,32 @@ func addPillRow(label, pillText string, pillBg, pillFg uintptr, pillW int32) {
 	cardCursorY += h
 }
 
-// addPolicyRow stacks the policy name on its own full-width line (ellipsized
-// against the whole card width, not squeezed alongside a pill) with the
-// OK/Violation pill on a second line below it — policy names in practice
-// are often long regulatory citations ("Esquema Nacional de Seguridad
-// (ENS, RD 311/2022)"), and giving the name a shared row with a pill left
-// too little room for DT_END_ELLIPSIS to show much of anything.
-func addPolicyRow(name, pillText string, pillBg, pillFg uintptr) {
-	nameH := s(20)
-	nameRect := winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX), bottom: cardCursorY + nameH}
-	cardItems = append(cardItems, drawItem{
-		kind: drawKindText, rect: nameRect, text: name, font: fontBody,
-		color: cardPrimaryTextColor(cardIsLight), align: dtLeft | dtVCenter | dtSingleLine | dtEndEllipsis,
-	})
-	cardCursorY += nameH + s(4)
+// cardPolicyPillW/cardPolicyGap are the fixed pill width and name-to-pill gap
+// used both by addPolicyRow's actual layout and by buildCardContent's width
+// measurement pass — kept as named constants specifically so the two can
+// never drift out of sync with each other.
+const (
+	cardPolicyPillW = 78
+	cardPolicyGap   = 10
+)
 
-	pw, ph := s(78), s(20)
-	pillRect := winRect{left: s(cardPadX), top: cardCursorY, right: s(cardPadX) + pw, bottom: cardCursorY + ph}
-	cardItems = append(cardItems, drawItem{
-		kind: drawKindPill, rect: pillRect, text: pillText, font: fontPill,
-		color: pillFg, bgColor: pillBg, align: dtCenter | dtVCenter | dtSingleLine, radius: s(10),
-	})
-	cardCursorY += ph + s(10)
+// addPolicyRow lays out the policy name and its OK/Violation pill on a single
+// row, name on the left (ellipsized only as a last-resort safety net; in
+// practice buildCardContent has already measured every policy name and sized
+// the whole card wide enough that DT_END_ELLIPSIS never actually needs to
+// cut anything) and the pill right-aligned, matching the web app's own
+// policy-list row style rather than stacking the pill onto its own line.
+func addPolicyRow(name, pillText string, pillBg, pillFg uintptr) {
+	h := s(cardRowH)
+	pw, ph := s(cardPolicyPillW), s(20)
+	nameRect := winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX) - pw - s(cardPolicyGap), bottom: cardCursorY + h}
+	pillTop := cardCursorY + (h-ph)/2
+	pillRect := winRect{left: cardWidthPx - s(cardPadX) - pw, top: pillTop, right: cardWidthPx - s(cardPadX), bottom: pillTop + ph}
+	cardItems = append(cardItems,
+		drawItem{kind: drawKindText, rect: nameRect, text: name, font: fontBody, color: cardPrimaryTextColor(cardIsLight), align: dtLeft | dtVCenter | dtSingleLine | dtEndEllipsis},
+		drawItem{kind: drawKindPill, rect: pillRect, text: pillText, font: fontPill, color: pillFg, bgColor: pillBg, align: dtCenter | dtVCenter | dtSingleLine, radius: s(10)},
+	)
+	cardCursorY += h + s(4)
 }
 
 func addBodyLine(text string, muted bool) {
@@ -354,6 +373,49 @@ func buildCardContent() {
 	cardCursorY = s(cardPadY)
 	light := cardIsLight
 
+	cache, err := readStatusCache()
+
+	// Card width: starts at the existing fixed default (cardMinWidth) and
+	// grows to fit the widest dynamic string this particular open actually
+	// needs to show (workspace/device subtitle, policy names) — capped at
+	// 90% of the screen width so it can never render partly off-screen on a
+	// small/low-res display. Measured up front against a screen-reference
+	// HDC via GetTextExtentPoint32W (the same glyph-metrics math DrawText
+	// itself consults internally), so every drawItem appended below already
+	// uses the final width and DT_END_ELLIPSIS never actually has anything
+	// left to truncate — it stays on the text items purely as a safety net
+	// for whatever's left over after the 90%-of-screen cap.
+	cardWidthPx = s(cardMinWidth)
+	var subtitle string
+	if err == nil && cache != nil {
+		subtitle = cache.WorkspaceSlug
+		if cache.DeviceName != "" {
+			subtitle = cache.DeviceName + " · " + subtitle
+		}
+		if screenDC, _, _ := procGetDC.Call(0); screenDC != 0 {
+			needed := cardWidthPx
+			if w := measureTextWidthPx(screenDC, fontSmall, subtitle) + s(cardPadX)*2; w > needed {
+				needed = w
+			}
+			if cache.Compliance.Available {
+				for _, p := range cache.Compliance.Policies {
+					w := measureTextWidthPx(screenDC, fontBody, p.Name) + s(cardPadX)*2 + s(cardPolicyPillW) + s(cardPolicyGap)
+					if w > needed {
+						needed = w
+					}
+				}
+			}
+			procReleaseDC.Call(0, screenDC)
+
+			if screenW, _, _ := procGetSystemMetrics.Call(uintptr(smCxScreen)); screenW > 0 {
+				if maxW := int32(float64(screenW) * 0.9); needed > maxW {
+					needed = maxW
+				}
+			}
+			cardWidthPx = needed
+		}
+	}
+
 	titleH := s(24)
 	cardItems = append(cardItems, drawItem{
 		kind:  drawKindText,
@@ -375,7 +437,6 @@ func buildCardContent() {
 		align: dtCenter | dtVCenter | dtSingleLine,
 	})
 
-	cache, err := readStatusCache()
 	if err != nil || cache == nil {
 		subtitleH := s(18)
 		cardItems = append(cardItems, drawItem{
@@ -391,10 +452,6 @@ func buildCardContent() {
 		return
 	}
 
-	subtitle := cache.WorkspaceSlug
-	if cache.DeviceName != "" {
-		subtitle = cache.DeviceName + " · " + subtitle
-	}
 	subtitleH := s(18)
 	cardItems = append(cardItems, drawItem{
 		kind:  drawKindText,
@@ -558,8 +615,11 @@ func showCard() {
 	if dpi, _, _ := procGetDpiForSystem.Call(); dpi > 0 {
 		cardScale = float64(dpi) / 96.0
 	}
-	cardWidthPx = s(440)
 
+	// cardWidthPx itself is computed inside buildCardContent (it needs fonts
+	// and the status cache to measure against, neither ready yet here) —
+	// nothing to set on this line anymore now that the card's width is
+	// dynamic rather than a fixed 440px.
 	ensureCardFonts()
 	buildCardContent()
 	registerCardClassOnce()
@@ -640,10 +700,11 @@ func paintCard(hdc uintptr) {
 }
 
 // cardWndProc backs the card's own window class — a small, self-contained
-// message handler: paint, close-button hit-test, Escape to dismiss, and
-// auto-dismiss when the card loses foreground focus (mirrors how the old
-// native popup menu dismissed on click-away, so the interaction still feels
-// familiar even though the underlying implementation changed completely).
+// message handler: paint, drag-to-move, close-button hit-test, Escape to
+// dismiss, and auto-dismiss when the card loses foreground focus (mirrors
+// how the old native popup menu dismissed on click-away, so the interaction
+// still feels familiar even though the underlying implementation changed
+// completely).
 //
 // Every dismiss path posts WM_CLOSE rather than calling DestroyWindow
 // directly. DestroyWindow tears the window down synchronously, including
@@ -665,6 +726,25 @@ func cardWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		}
 		procEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 		return 0
+	case wmNcHitTest:
+		// The card is a plain WS_POPUP with no title bar, so nothing about it
+		// is draggable by default. Reporting HTCAPTION for a click anywhere
+		// on it other than the close button hands the actual move-tracking
+		// off to Windows' own built-in window-move loop (the same one a real
+		// title bar drag would trigger) -- simpler and more correct than
+		// hand-tracking WM_LBUTTONDOWN/WM_MOUSEMOVE/WM_LBUTTONUP ourselves
+		// (which would also have to fight the existing close-button and
+		// deactivate-to-dismiss handling below for the same mouse events).
+		ret, _, _ := procDefWindowProcW.Call(hwnd, msg, wParam, lParam)
+		if uint32(ret) == htClient {
+			pt := point{x: int32(int16(uint32(lParam) & 0xFFFF)), y: int32(int16(uint32(lParam) >> 16))}
+			procScreenToClient.Call(hwnd, uintptr(unsafe.Pointer(&pt)))
+			onCloseButton := pt.x >= cardCloseRect.left && pt.x <= cardCloseRect.right && pt.y >= cardCloseRect.top && pt.y <= cardCloseRect.bottom
+			if !onCloseButton {
+				return htCaption
+			}
+		}
+		return ret
 	case wmLButtonDown:
 		x := int32(int16(uint32(lParam) & 0xFFFF))
 		y := int32(int16(uint32(lParam) >> 16))
