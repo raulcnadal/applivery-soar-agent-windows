@@ -29,9 +29,32 @@ jobs:
       - name: Install WiX Toolset v4
         run: dotnet tool install --global wix --version "4.*"
 
+      # goversioninfo turns versioninfo/*.json into a resource.syso next to
+      # each package's main.go — `go build` links in any *.syso file it
+      # finds in a package directory automatically, no extra build flags
+      # needed. This is what gives each exe a real embedded VERSIONINFO
+      # resource (FileVersion, CompanyName, ProductName, ...) instead of
+      # Windows falling back to showing "0.0.0.0"/no publisher in Explorer's
+      # Properties dialog and in Windows Error Reporting. continue-on-error
+      # here: version metadata is cosmetic, never worth failing the whole
+      # build over if the tool's CLI surface has drifted.
+      - name: Install goversioninfo
+        continue-on-error: true
+        shell: bash
+        run: go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
+
       # ---------------------------------------------------
       # 1. BUILD x64 MSI
       # ---------------------------------------------------
+      - name: Generate x64 version-info resources
+        continue-on-error: true
+        shell: bash
+        run: |
+          rm -f resource.syso watchdog/resource.syso tray/resource.syso
+          goversioninfo -64 -o resource.syso versioninfo/agent.json
+          goversioninfo -64 -o watchdog/resource.syso versioninfo/watchdog.json
+          goversioninfo -64 -o tray/resource.syso versioninfo/tray.json
+
       - name: Build Go x64 Executable
         env:
           GOOS: windows
@@ -96,6 +119,22 @@ jobs:
       # ---------------------------------------------------
       # 2. BUILD ARM64 MSI
       # ---------------------------------------------------
+      # The x64 .syso files above are amd64-machine-type COFF objects — the
+      # ARM64 linker will reject them (or worse, silently mislink), so the
+      # very first thing this step does is unconditionally delete them,
+      # ahead of any goversioninfo call. Combined with the job's default
+      # `set -e` and this step's own continue-on-error, the worst case if
+      # goversioninfo itself fails here is "ARM64 build has no version
+      # info" — never "ARM64 build links against x64 resources."
+      - name: Generate ARM64 version-info resources
+        continue-on-error: true
+        shell: bash
+        run: |
+          rm -f resource.syso watchdog/resource.syso tray/resource.syso
+          goversioninfo -arm64 -o resource.syso versioninfo/agent.json
+          goversioninfo -arm64 -o watchdog/resource.syso versioninfo/watchdog.json
+          goversioninfo -arm64 -o tray/resource.syso versioninfo/tray.json
+
       - name: Build Go ARM64 Executable
         env:
           GOOS: windows
