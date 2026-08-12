@@ -460,7 +460,8 @@ func main() {
 	// cause of a blurry tray icon/card on a scaled display. Available since
 	// Windows 10 1703; a failure here (older Windows) just means this
 	// process falls back to system-DPI-aware behavior, not a crash.
-	dpiAwarenessContextPerMonitorAwareV2 := uintptr(int64(-4))
+	var dpiAwarenessContextPerMonitorAwareV2Src int64 = -4
+	dpiAwarenessContextPerMonitorAwareV2 := uintptr(dpiAwarenessContextPerMonitorAwareV2Src)
 	procSetProcessDpiAwarenessContext.Call(dpiAwarenessContextPerMonitorAwareV2)
 
 	loadEmbeddedFonts()
