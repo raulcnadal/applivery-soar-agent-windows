@@ -168,9 +168,16 @@ scripts are shelled out to for the built-in telemetry (Custom Device Checks'
 
 1. **Device identity** — hardware serial number via WMI `Win32_BIOS`.
 2. **OS build** — `SOFTWARE\Microsoft\Windows NT\CurrentVersion`.
-3. **BitLocker status** — `root\CIMv2\Security\MicrosoftVolumeEncryption`.
-4. **Firewall status** — `SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile`.
-5. **Installed software** (when `ReportApps=1`) — 64-bit, 32-bit
+3. **OS edition** (Pro/Enterprise/Enterprise LTSC/Education/...) —
+   `SOFTWARE\Microsoft\Windows NT\CurrentVersion\EditionID`, mapped to a
+   human-readable label. Applivery's own device inventory only ever reports
+   the raw OS build number, never which edition is installed, so this is
+   agent-only data — the backend pairs it with its own build-to-feature-name
+   lookup (e.g. build `28000` → "Windows 11, version 26H1") to show a full
+   "Windows 11, version 26H1 · Pro" line in the device's Overview tab.
+4. **BitLocker status** — `root\CIMv2\Security\MicrosoftVolumeEncryption`.
+5. **Firewall status** — `SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile`.
+6. **Installed software** (when `ReportApps=1`) — 64-bit, 32-bit
    (`WOW6432Node`), and per-user `Uninstall` registry keys, deduplicated into
    clean name/version pairs.
 
@@ -224,6 +231,7 @@ an explicit warning about this; use it deliberately.
   "serialNumber": "PF3ABCDE",
   "attributes": {
     "OsBuild": "22631.3527",
+    "OsEdition": "Pro",
     "BitLockerStatus": true,
     "FirewallEnabled": true
   },

@@ -105,6 +105,15 @@ func gatherAndReport() {
 
 	attributes := make(map[string]interface{})
 	attributes["OsBuild"] = GetOSBuild()
+	// Unconditional, like OsBuild above — this is basic inventory (which
+	// edition is installed), not a security-posture toggle, so it doesn't
+	// need its own Managed Configuration flag the way BitLocker/Firewall
+	// reporting do. Omitted entirely (rather than sent as "") if the
+	// registry read fails, so the backend/UI can tell "agent doesn't know"
+	// apart from "no edition installed."
+	if edition := GetOSEdition(); edition != "" {
+		attributes["OsEdition"] = edition
+	}
 	if config.ReportBitLocker {
 		attributes["BitLockerStatus"] = GetBitLockerStatus()
 	}

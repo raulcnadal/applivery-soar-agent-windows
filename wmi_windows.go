@@ -80,6 +80,63 @@ func GetFirewallStatus() bool {
 	return true
 }
 
+// editionIDToLabel maps the registry's machine-readable EditionID codes to
+// the human-readable edition names Microsoft itself uses in docs/UI —
+// EditionID's raw values ("EnterpriseS" for LTSC, "Professional" for Pro,
+// etc.) aren't self-explanatory on their own.
+var editionIDToLabel = map[string]string{
+	"Core":                    "Home",
+	"CoreN":                   "Home N",
+	"CoreSingleLanguage":      "Home Single Language",
+	"CoreCountrySpecific":     "Home China",
+	"Professional":            "Pro",
+	"ProfessionalN":           "Pro N",
+	"ProfessionalWorkstation": "Pro for Workstations",
+	"ProfessionalWorkstationN": "Pro for Workstations N",
+	"ProfessionalEducation":   "Pro Education",
+	"ProfessionalEducationN":  "Pro Education N",
+	"Education":               "Education",
+	"EducationN":              "Education N",
+	"Enterprise":              "Enterprise",
+	"EnterpriseN":             "Enterprise N",
+	"EnterpriseS":             "Enterprise LTSC",
+	"EnterpriseSN":            "Enterprise LTSC N",
+	"IoTEnterprise":           "IoT Enterprise",
+	"IoTEnterpriseS":          "IoT Enterprise LTSC",
+	"IoTEnterpriseSK":         "IoT Enterprise LTSC K",
+	"ServerStandard":          "Server Standard",
+	"ServerDatacenter":        "Server Datacenter",
+	"ServerStandardCore":      "Server Standard (Core)",
+	"ServerDatacenterCore":    "Server Datacenter (Core)",
+}
+
+// GetOSEdition reads the installed Windows edition (Pro/Enterprise/
+// Enterprise LTSC/Education/...) from the registry. Applivery's own device
+// inventory only ever reports the raw OS build number (e.g.
+// "10.0.28000.2704") — it has no concept of edition at all — so this is
+// agent-only data with no Applivery-side equivalent, filling in exactly the
+// gap the backend's build-number-to-feature-name lookup can't. Returns ""
+// (never sent as an attribute — see gatherAndReport) if the key/value can't
+// be read, or the raw EditionID string itself for any edition not in the
+// map above rather than silently dropping it.
+func GetOSEdition() string {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Windows NT\CurrentVersion`, registry.QUERY_VALUE)
+	if err != nil {
+		log.Printf("Error opening CurrentVersion registry key for edition: %v", err)
+		return ""
+	}
+	defer k.Close()
+	editionID, _, err := k.GetStringValue("EditionID")
+	if err != nil || editionID == "" {
+		log.Printf("Error reading EditionID: %v", err)
+		return ""
+	}
+	if label, ok := editionIDToLabel[editionID]; ok {
+		return label
+	}
+	return editionID
+}
+
 func GetSerialNumber() string {
 	var dst []Win32_BIOS
 	query := wmi.CreateQuery(&dst, "")
