@@ -68,6 +68,7 @@ const (
 	dtSingleLine      = 0x00000020
 	dtEndEllipsis     = 0x00008000
 	dtWordBreak       = 0x00000010
+	fwLight           = 300 // matches the BlueSky design system's StatusPill (font-light)
 	fwRegular         = 400
 	fwSemiBold        = 600
 	fwBold            = 700

@@ -89,11 +89,16 @@ const (
 	// generated from applivery-bp-login.svg via cairosvg at 1.5x its native
 	// 673x64 viewBox, ~4x supersampled relative to the card's actual display
 	// size so StretchBlt's HALFTONE downscale stays crisp at every DPI this
-	// card already scales for). Hardcoded rather than queried via
-	// GetObjectW/BITMAP at load time — this repo controls both assets
-	// exactly, and skipping that call is one fewer new GDI struct to get
-	// wrong with no local Windows build to verify it against.
-	bannerRasterW = 1010
+	// card already scales for), then tightly cropped to the wordmark's own
+	// bounding box (measured pixel-by-pixel against the render background —
+	// the source SVG's 673x64 viewBox carries a ~10% empty margin on both
+	// sides that the plain 1.5x scale left in place, which is what made the
+	// banner look indented relative to the flush-left device name/slug text
+	// below it). Hardcoded rather than queried via GetObjectW/BITMAP at load
+	// time — this repo controls both assets exactly, and skipping that call
+	// is one fewer new GDI struct to get wrong with no local Windows build
+	// to verify it against.
+	bannerRasterW = 795
 	bannerRasterH = 96
 
 	cardClassName     = "ApplivierySOARCardWndClass"
@@ -125,24 +130,44 @@ var (
 	procSetStretchBltMode  = modgdi32.NewProc("SetStretchBltMode")
 )
 
-// Color palette — matches frontend/src/assets/styles/bluesky-tokens.css
-// (--color-brand-600) and the app-wide severity/status colors used
-// throughout the SOAR web app (grepped from the frontend's Tailwind
-// classes/components rather than guessed, so the card reads as the same
-// product as the dashboard).
+// Color palette — sourced from the applivery-bluesky-design-system repo's
+// src/styles/design-tokens.ts (colorBrand/colorSemantic), the same tokens
+// the SOAR web app itself is built on, rather than eyeballed from
+// screenshots — so the card reads as the same product as the dashboard.
 var (
-	colBrand   = colorref(2, 65, 227)   // #0241E3 — brand-600
-	colSuccess = colorref(34, 197, 94)  // #22C55E — compliant/OK
-	colDanger  = colorref(239, 68, 68)  // #EF4444 — violation/high severity
-	colWarning = colorref(245, 158, 11) // #F59E0B — medium severity
-	colCrit    = colorref(185, 28, 28)  // #B91C1C — critical severity
-	colLow     = colorref(100, 116, 139)
-	colWhite   = colorref(255, 255, 255)
-	colGray900 = colorref(17, 24, 39) // dark-theme surface
-	colGray200 = colorref(229, 231, 235)
-	colGray700 = colorref(55, 65, 81)
-	colGray400 = colorref(156, 163, 175) // muted text, both themes
+	colBrand    = colorref(2, 65, 227)   // #0241E3 — brand-600 (Button primary)
+	colBrand700 = colorref(2, 53, 192)   // #0235C0 — brand-700 (Button secondary border/text)
+	colSuccess  = colorref(34, 197, 94)  // #22C55E — green-500, compliant/OK
+	colDanger   = colorref(239, 68, 68)  // #EF4444 — red-500, violation/high severity
+	colWarning  = colorref(245, 158, 11) // #F59E0B — medium severity
+	colCrit     = colorref(185, 28, 28)  // #B91C1C — critical severity
+	colLow      = colorref(100, 116, 139)
+	colWhite    = colorref(255, 255, 255)
+	colGray900  = colorref(17, 24, 39) // dark-theme surface
+	colGray200  = colorref(229, 231, 235)
+	colGray700  = colorref(55, 65, 81)
+	colGray400  = colorref(156, 163, 175) // muted text, both themes
 )
+
+// blendColor approximates drawing `fg` at `fgAlpha` opacity over an opaque
+// `bg` — GDI pens/brushes have no alpha channel (COLORREF is a plain RGB
+// triple, and a real per-pixel blend would need AlphaBlend from msimg32.dll,
+// new API surface this card doesn't otherwise need), so instead this
+// precomputes the flattened RGB result against whatever solid color sits
+// directly behind it. Used for the pill borders below, which in the
+// BlueSky design system (StatusPill.tsx) are `border-current/25` — a
+// border tinted to the pill's own text color at 25% opacity, painted over
+// the pill's own fill color (the CSS border sits right at the edge of that
+// fill) — a detail the card was missing entirely (no border on
+// solid-filled pills at all) before this pass.
+func blendColor(fg, bg uintptr, fgAlpha float64) uintptr {
+	fgR, fgG, fgB := byte(fg&0xFF), byte((fg>>8)&0xFF), byte((fg>>16)&0xFF)
+	bgR, bgG, bgB := byte(bg&0xFF), byte((bg>>8)&0xFF), byte((bg>>16)&0xFF)
+	mix := func(f, b byte) byte {
+		return byte(float64(f)*fgAlpha + float64(b)*(1-fgAlpha))
+	}
+	return colorref(mix(fgR, bgR), mix(fgG, bgG), mix(fgB, bgB))
+}
 
 func cardSurfaceColor(light bool) uintptr {
 	if light {
@@ -204,6 +229,10 @@ type drawItem struct {
 	align        uintptr
 	radius       int32
 	outline      bool
+	// borderColor, when non-zero, draws an additional thin stroke on top of
+	// a solid-filled drawKindPill (as opposed to `outline`, which replaces
+	// the fill with a stroke entirely) — see blendColor's doc comment.
+	borderColor  uintptr
 	iconHandle   uintptr
 	bitmapHandle uintptr
 }
@@ -248,16 +277,28 @@ func s(v int32) int32 {
 	return int32(float64(v) * cardScale)
 }
 
+// Font weights below match the BlueSky design system's actual scale
+// (design-tokens.ts's fontWeights: Light 300 / Regular 400 / Medium 500 /
+// Semibold 600 — there is no heavier "Bold" weight in this system) and the
+// real web app's own usage (DeviceDetailDrawer.vue renders device.displayName
+// with `font-semibold`, not `font-bold`) — fontTitle previously used
+// fwBold(700), a full step heavier than anything else in the product, which
+// is why the device name/close glyph read as visually inconsistent with the
+// rest of the card.
 func ensureCardFonts() {
 	if fontsReady {
 		return
 	}
-	fontTitle = createFont(fontFamilyUI, s(19), fwBold)
+	fontTitle = createFont(fontFamilyUI, s(19), fwSemiBold)
 	fontSection = createFont(fontFamilyUI, s(12), fwSemiBold)
 	fontBody = createFont(fontFamilyUI, s(14), fwRegular)
 	fontBodyMed = createFont(fontFamilyUI, s(14), fwSemiBold)
 	fontSmall = createFont(fontFamilyUI, s(12), fwRegular)
-	fontPill = createFont(fontFamilyUI, s(12), fwSemiBold)
+	// StatusPill.tsx renders pill labels `font-light` (300) — not semibold —
+	// with `text-xs` (12px); Button.tsx renders its own label `font-normal`
+	// (400) at 14px for the md size this card uses, which addActionButtons
+	// gets by reusing fontBody directly rather than this font.
+	fontPill = createFont(fontFamilyUI, s(12), fwLight)
 	fontsReady = true
 }
 
@@ -315,12 +356,14 @@ func ptInRect(pt point, r winRect) bool {
 }
 
 // addActionButtons lays out the "Force report" / "Force evaluate
-// compliance" pair side by side, full-width, right under the header. Drawn
-// as drawKindPill rows like the rest of the card's badges, but with a
-// smaller corner radius (s(8) vs the s(11)/s(13) used by status pills) so
-// they read as rectangular buttons rather than another status indicator —
-// the primary action (evaluate) solid brand-blue, the secondary (report)
-// an outline in the same style as addHeroPills' left-hand outline pill.
+// compliance" pair side by side, full-width, right under the header,
+// matching applivery-bluesky-design-system's Button.tsx exactly rather than
+// improvising a look: rounded-lg (radius 8), 14px font-normal label
+// (fontBody, not the pills' fontPill), primary variant solid brand-600/
+// white, secondary variant white/transparent with a brand-700 border and
+// brand-700 text — not the muted gray this used before, which was the main
+// reason the two buttons and the pills below them read as unrelated
+// components rather than one consistent design system.
 func addActionButtons() {
 	h := s(32)
 	gap := s(10)
@@ -330,8 +373,8 @@ func addActionButtons() {
 	cardForceEvaluateRect = winRect{left: s(cardPadX) + btnW + gap, top: top, right: s(cardPadX) + btnW + gap + btnW, bottom: top + h}
 	textAlign := uintptr(dtCenter | dtVCenter | dtSingleLine | dtEndEllipsis)
 	cardItems = append(cardItems,
-		drawItem{kind: drawKindPill, rect: cardForceReportRect, text: "Force report", font: fontPill, color: cardPrimaryTextColor(cardIsLight), bgColor: cardBorderColor(cardIsLight), align: textAlign, radius: s(8), outline: true},
-		drawItem{kind: drawKindPill, rect: cardForceEvaluateRect, text: "Force evaluate compliance", font: fontPill, color: colWhite, bgColor: colBrand, align: textAlign, radius: s(8)},
+		drawItem{kind: drawKindPill, rect: cardForceReportRect, text: "Force report", font: fontBody, color: colBrand700, bgColor: colBrand700, align: textAlign, radius: s(8), outline: true},
+		drawItem{kind: drawKindPill, rect: cardForceEvaluateRect, text: "Force evaluate compliance", font: fontBody, color: colWhite, bgColor: colBrand, align: textAlign, radius: s(8)},
 	)
 	cardCursorY = top + h + s(16)
 }
@@ -385,7 +428,7 @@ func addPillRow(label, pillText string, pillBg, pillFg uintptr, pillW int32) {
 	pillRect := winRect{left: cardWidthPx - s(cardPadX) - pw, top: pillTop, right: cardWidthPx - s(cardPadX), bottom: pillTop + ph}
 	cardItems = append(cardItems,
 		drawItem{kind: drawKindText, rect: labelRect, text: label, font: fontBody, color: cardMutedTextColor(), align: dtLeft | dtVCenter | dtSingleLine | dtEndEllipsis},
-		drawItem{kind: drawKindPill, rect: pillRect, text: pillText, font: fontPill, color: pillFg, bgColor: pillBg, align: dtCenter | dtVCenter | dtSingleLine, radius: s(11)},
+		drawItem{kind: drawKindPill, rect: pillRect, text: pillText, font: fontPill, color: pillFg, bgColor: pillBg, align: dtCenter | dtVCenter | dtSingleLine, radius: s(11), borderColor: blendColor(pillFg, pillBg, 0.25)},
 	)
 	cardCursorY += h
 }
@@ -413,7 +456,7 @@ func addPolicyRow(name, pillText string, pillBg, pillFg uintptr) {
 	pillRect := winRect{left: cardWidthPx - s(cardPadX) - pw, top: pillTop, right: cardWidthPx - s(cardPadX), bottom: pillTop + ph}
 	cardItems = append(cardItems,
 		drawItem{kind: drawKindText, rect: nameRect, text: name, font: fontBody, color: cardPrimaryTextColor(cardIsLight), align: dtLeft | dtVCenter | dtSingleLine | dtEndEllipsis},
-		drawItem{kind: drawKindPill, rect: pillRect, text: pillText, font: fontPill, color: pillFg, bgColor: pillBg, align: dtCenter | dtVCenter | dtSingleLine, radius: s(10)},
+		drawItem{kind: drawKindPill, rect: pillRect, text: pillText, font: fontPill, color: pillFg, bgColor: pillBg, align: dtCenter | dtVCenter | dtSingleLine, radius: s(10), borderColor: blendColor(pillFg, pillBg, 0.25)},
 	)
 	cardCursorY += h + s(4)
 }
@@ -465,10 +508,15 @@ func addHeroPills(leftText string, leftW int32, rightText string, rightW int32, 
 	startX := (cardWidthPx - total) / 2
 	leftRect := winRect{left: startX, top: cardCursorY, right: startX + lw, bottom: cardCursorY + h}
 	rightRect := winRect{left: startX + lw + gap, top: cardCursorY, right: startX + lw + gap + rw, bottom: cardCursorY + h}
-	borderCol := cardBorderColor(cardIsLight)
+	// Left pill mirrors StatusPill's neutral "gray" variant — outline-only
+	// (no fill) rather than the gray-100 fill StatusPill itself uses, so it
+	// still reads correctly against both the dark and light card surface —
+	// but the border is now the same blended-tint treatment as every other
+	// pill on this card instead of a flat, unrelated gray.
+	leftBorder := blendColor(colGray400, cardSurfaceColor(cardIsLight), 0.4)
 	cardItems = append(cardItems,
-		drawItem{kind: drawKindPill, rect: leftRect, text: leftText, font: fontPill, color: cardMutedTextColor(), bgColor: borderCol, align: dtCenter | dtVCenter | dtSingleLine, radius: s(13), outline: true},
-		drawItem{kind: drawKindPill, rect: rightRect, text: rightText, font: fontPill, color: rightFg, bgColor: rightBg, align: dtCenter | dtVCenter | dtSingleLine, radius: s(13)},
+		drawItem{kind: drawKindPill, rect: leftRect, text: leftText, font: fontPill, color: cardMutedTextColor(), bgColor: leftBorder, align: dtCenter | dtVCenter | dtSingleLine, radius: s(13), outline: true},
+		drawItem{kind: drawKindPill, rect: rightRect, text: rightText, font: fontPill, color: rightFg, bgColor: rightBg, align: dtCenter | dtVCenter | dtSingleLine, radius: s(13), borderColor: blendColor(rightFg, rightBg, 0.25)},
 	)
 	cardCursorY += h
 }
@@ -538,14 +586,21 @@ func buildCardContent() {
 	// everything the way that modal does, since the banner is explicitly
 	// top-left here rather than centered.
 	bannerH := s(22)
+	bannerTop := cardCursorY
 	bannerW := int32(float64(bannerH) * float64(bannerRasterW) / float64(bannerRasterH))
 	cardItems = append(cardItems, drawItem{
 		kind:         drawKindBitmap,
-		rect:         winRect{left: s(cardPadX), top: cardCursorY, right: s(cardPadX) + bannerW, bottom: cardCursorY + bannerH},
+		rect:         winRect{left: s(cardPadX), top: bannerTop, right: s(cardPadX) + bannerW, bottom: bannerTop + bannerH},
 		bitmapHandle: cardBannerHandle,
 	})
 
-	cardCloseRect = winRect{left: cardWidthPx - s(36), top: s(12), right: cardWidthPx - s(12), bottom: s(12) + s(24)}
+	// The close button is vertically centered against the banner's own row
+	// (rather than a fixed top offset that assumed a taller, centered text
+	// title) so the × sits level with the logo instead of noticeably above
+	// it.
+	closeSize := s(24)
+	closeTop := bannerTop + (bannerH-closeSize)/2
+	cardCloseRect = winRect{left: cardWidthPx - s(cardPadX) - closeSize, top: closeTop, right: cardWidthPx - s(cardPadX), bottom: closeTop + closeSize}
 	cardItems = append(cardItems, drawItem{
 		kind:  drawKindText,
 		rect:  cardCloseRect,
@@ -554,7 +609,7 @@ func buildCardContent() {
 		color: cardMutedTextColor(),
 		align: dtCenter | dtVCenter | dtSingleLine,
 	})
-	cardCursorY += bannerH + s(14)
+	cardCursorY = bannerTop + bannerH + s(14)
 
 	deviceNameH := s(24)
 	cardItems = append(cardItems, drawItem{
@@ -841,6 +896,9 @@ func paintCard(hdc uintptr) {
 				roundRectStroke(hdc, &r, item.radius, item.bgColor, s(1))
 			} else {
 				roundRectFill(hdc, &r, item.radius, item.bgColor)
+				if item.borderColor != 0 {
+					roundRectStroke(hdc, &r, item.radius, item.borderColor, s(1))
+				}
 			}
 			procSelectObject.Call(hdc, item.font)
 			procSetTextColor.Call(hdc, item.color)
