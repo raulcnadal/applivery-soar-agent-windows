@@ -56,7 +56,10 @@ mirror.
   Applivery itself, Intune, etc. — can push as a registry-backed
   configuration profile.
 * **Reporting loop:** Wakes on a configurable timer (`IntervalSec`, default
-  1 hour — 3600s), gathers telemetry, and POSTs it with retry + backoff.
+  1 hour — 3600s), gathers telemetry, and POSTs it with retry + backoff. A
+  second, much shorter timer (~2s) checks for a force-report/force-evaluate
+  trigger file dropped by the tray's action buttons (see "Tray icon" below)
+  and, if present, runs an extra out-of-cycle pass immediately.
 * **Custom Device Checks:** Once per cycle, before reporting, the agent polls
   the backend for whatever checks an admin has defined for Windows in
   **Settings → Custom Device Checks**, runs each one locally, and includes
@@ -110,19 +113,33 @@ show tray UI directly.
   BlueSky-styled window (brand blue, rounded corners, the system Segoe UI
   font) rather than a native popup menu, opened centered on screen but
   freely drag-movable afterward (click anywhere on the card except the close
-  button and drag — standard Win32 window-move behavior, not a custom drag
-  implementation). It's read-only and purely informational/troubleshooting:
-  what's currently being reported (workspace, last report time/result,
-  BitLocker/Firewall status, whether app inventory is included), and this
-  device's Compliance Policy status — compliant/not, risk score and tier,
-  and the applicable policies for this platform with a per-policy
-  OK/Violation pill. The card sizes itself to whatever it needs to show
-  (long policy names grow it wider rather than truncating, up to 90% of the
-  screen width) rather than a fixed size. There is deliberately no link to
-  the SOAR dashboard and no way to exit the tray from here — this agent runs
-  on end-user devices, not admin machines, and the tray is part of the same
-  tamper-resistance story as the watchdog service above. Dismiss with the
-  close button, `Esc`, or by clicking elsewhere.
+  button/action buttons and drag — standard Win32 window-move behavior, not
+  a custom drag implementation). The header shows the Applivery SOAR banner
+  logo top-left, then this device's name (as reported by Applivery) in bold
+  and the workspace slug muted beneath it. Below that: what's currently
+  being reported (workspace, last report time/result, BitLocker/Firewall
+  status, whether app inventory is included), and this device's Compliance
+  Policy status — compliant/not, risk score and tier, and the applicable
+  policies for this platform with a per-policy OK/Violation pill. The card
+  sizes itself to whatever it needs to show (long device/policy names grow
+  it wider rather than truncating, up to 90% of the screen width) rather
+  than a fixed size. There is deliberately no link to the SOAR dashboard and
+  no way to exit the tray from here — this agent runs on end-user devices,
+  not admin machines, and the tray is part of the same tamper-resistance
+  story as the watchdog service above. Dismiss with the close button, `Esc`,
+  or by clicking elsewhere.
+* **"Force report" / "Force evaluate compliance" buttons**, right under the
+  header, let the person at this device kick off an out-of-cycle report or
+  compliance evaluation instead of waiting for the next scheduled tick
+  (report interval, or the backend's own 60s evaluation scheduler). Neither
+  button calls the backend from the tray process itself — the tray has no
+  HTTP client or `ReportSecret` of its own (see below) — clicking one just
+  drops an empty marker file under `%ProgramData%\Applivery\SOAR\` that the
+  main service polls for every ~2 seconds and actions (an immediate
+  `gatherAndReport()` cycle, or a `POST /api/device-data/evaluate-now`
+  request). A balloon confirms the request was queued; `agent.log` has the
+  actual outcome (e.g. if no Automation Credential is configured for the
+  workspace yet).
 * **Notifications.** The tray also raises a Windows balloon/Action Center
   notification when this device's compliance state actually changes state
   while the tray is running: one or more policy violations newly detected,
@@ -130,11 +147,13 @@ show tray UI directly.
   (not on every poll), and only for changes observed after the tray starts
   — it doesn't notify about whatever state the device happened to already
   be in at startup.
-* **It never touches the service.** The tray process has no registry access
-  to the `ReportSecret` and no HTTP client of its own — it only reads
-  `%ProgramData%\Applivery\SOAR\status.json`, written by the agent service
-  after every report cycle. This keeps the tray simple (a pure reader) and
-  guarantees it always shows exactly what was actually last reported.
+* **It never talks to the backend directly.** The tray process has no
+  registry access to the `ReportSecret` and no HTTP client of its own — it
+  only reads `%ProgramData%\Applivery\SOAR\status.json` (written by the
+  agent service after every report cycle) and, for the two force-action
+  buttons, writes an empty trigger file the service polls for. This keeps
+  the tray simple and guarantees the status it shows always reflects exactly
+  what the already-authenticated service actually last reported.
 
 ---
 

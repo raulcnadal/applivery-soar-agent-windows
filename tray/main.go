@@ -12,14 +12,18 @@
 // directly. Instead the installer registers a Scheduled Task (agent.wxs)
 // that starts this exe once any user logs on.
 //
-// This process is read-only: it has no registry access to the Managed
-// Configuration secret and no HTTP client of its own. Everything it shows
-// comes from %ProgramData%\Applivery\SOAR\status.json, written by the main
+// This process has no registry access to the Managed Configuration secret
+// and no HTTP client of its own — everything the card shows comes from
+// %ProgramData%\Applivery\SOAR\status.json, written by the main
 // AppliverySOARAgent service after every report cycle (status_windows.go /
 // internal/agentstatus in the repo root) — that package's doc comment has
 // the full rationale for the split. Re-read fresh every time the card is
 // opened (and on a 60s timer for the tooltip/icon/notifications), so it's
-// never more than one report cycle stale.
+// never more than one report cycle stale. The card's "Force report"/"Force
+// evaluate compliance" buttons are the one exception to "read-only": they
+// drop an empty marker file (agentstatus.WriteTrigger) the main service
+// polls for, rather than this process calling the backend itself — see
+// triggerForceReport/triggerForceEvaluate below.
 //
 // This agent runs on end-user devices, not admin machines — there is
 // deliberately no "open dashboard" link (the dashboard is admin-only) and
@@ -53,7 +57,7 @@ import (
 	"github.com/raulcnadal/applivery-soar-agent-windows/internal/agentstatus"
 )
 
-//go:embed icons/tray_light.ico icons/tray_dark.ico
+//go:embed icons/tray_light.ico icons/tray_dark.ico icons/banner_light.bmp icons/banner_dark.bmp
 var iconFS embed.FS
 
 const (
@@ -188,6 +192,8 @@ var (
 	mainHwnd        uintptr
 	lightIconPath   string
 	darkIconPath    string
+	lightBannerPath string
+	darkBannerPath  string
 	trayIconHandle  uintptr
 	trayIsLightMode bool
 
@@ -364,6 +370,32 @@ func showBalloon(title, msg string, infoFlags uint32) {
 	procShellNotifyIconW.Call(uintptr(nimModify), uintptr(unsafe.Pointer(&data)))
 }
 
+// triggerForceReport/triggerForceEvaluate back the status card's "Force
+// report"/"Force evaluate compliance" buttons (card.go's cardWndProc). This
+// process still has no HTTP client or Managed Configuration secret of its
+// own — see this file's top doc comment — so rather than calling the
+// backend directly, it drops an empty marker file the already-authenticated
+// main service polls for every couple of seconds and acts on
+// (agentstatus.WriteTrigger's doc comment has the full design). The balloon
+// confirms the request was queued, not that it necessarily succeeded — the
+// service's own agent.log has the actual outcome if something goes wrong
+// (no Automation Credential configured, a network error, etc.).
+func triggerForceReport() {
+	if err := agentstatus.WriteTrigger(agentstatus.TriggerReportPath()); err != nil {
+		log.Printf("Could not write force-report trigger: %v", err)
+		return
+	}
+	showBalloon("Applivery SOAR", "Reporting to Applivery SOAR now…", niifInfo)
+}
+
+func triggerForceEvaluate() {
+	if err := agentstatus.WriteTrigger(agentstatus.TriggerEvaluatePath()); err != nil {
+		log.Printf("Could not write force-evaluate trigger: %v", err)
+		return
+	}
+	showBalloon("Applivery SOAR", "Evaluating compliance now…", niifInfo)
+}
+
 func pluralPolicy(n int) string {
 	if n == 1 {
 		return "policy"
@@ -502,6 +534,14 @@ func main() {
 	darkIconPath, err = extractIcon("tray_dark.ico")
 	if err != nil {
 		log.Printf("Could not extract dark-theme icon: %v", err)
+	}
+	lightBannerPath, err = extractIcon("banner_light.bmp")
+	if err != nil {
+		log.Printf("Could not extract light-theme header banner: %v", err)
+	}
+	darkBannerPath, err = extractIcon("banner_dark.bmp")
+	if err != nil {
+		log.Printf("Could not extract dark-theme header banner: %v", err)
 	}
 
 	hInst, _, _ := procGetModuleHandleW.Call(0)

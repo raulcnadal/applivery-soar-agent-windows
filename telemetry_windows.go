@@ -15,6 +15,13 @@ import (
 	"github.com/raulcnadal/applivery-soar-agent-windows/internal/agentstatus"
 )
 
+// triggerPollInterval is how often runAgentLoop checks for a force-report/
+// force-evaluate marker file left by the tray helper (agentstatus.
+// WriteTrigger's doc comment has the full rationale). A plain os.Stat every
+// couple of seconds is cheap enough to not need its own goroutine/channel —
+// it just rides the same select alongside the normal report ticker.
+const triggerPollInterval = 2 * time.Second
+
 type DeviceData struct {
 	Platform     string                 `json:"platform"`
 	SerialNumber string                 `json:"serialNumber"`
@@ -68,16 +75,37 @@ func runAgentLoop(stopChan <-chan struct{}) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	triggerTicker := time.NewTicker(triggerPollInterval)
+	defer triggerTicker.Stop()
+
 	gatherAndReport()
 
 	for {
 		select {
 		case <-ticker.C:
 			gatherAndReport()
+		case <-triggerTicker.C:
+			checkTriggers()
 		case <-stopChan:
 			log.Println("Agent loop received stop signal. Shutting down gracefully.")
 			return
 		}
+	}
+}
+
+// checkTriggers is the service side of the tray's "Force report"/"Force
+// evaluate compliance" buttons — see agentstatus.WriteTrigger's doc comment
+// for the full design. Each trigger file is consumed (deleted) the instant
+// it's seen, so a click can never double-fire even if this tick and the
+// tray's write race.
+func checkTriggers() {
+	if agentstatus.ConsumeTrigger(agentstatus.TriggerReportPath()) {
+		log.Println("Force report triggered from the tray — running an immediate report cycle.")
+		gatherAndReport()
+	}
+	if agentstatus.ConsumeTrigger(agentstatus.TriggerEvaluatePath()) {
+		log.Println("Force evaluate triggered from the tray — requesting an immediate compliance evaluation.")
+		forceEvaluateCompliance()
 	}
 }
 

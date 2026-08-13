@@ -4,13 +4,22 @@
 // The status card shown when a user clicks (or right-clicks — Explorer
 // treats both as "activate" for a notification-area icon) the tray icon.
 // Replaces what used to be a native Win32 popup menu with a small,
-// custom-painted, borderless window: a centered "card" laid out to match
-// the SOAR web app's own Workspace Profile modal (centered mark, bold
-// title, a pair of pills, bordered brand-blue outline, boxed sections) so
-// the native tray experience reads as the same product as the dashboard.
-// Read-only and purely informational/troubleshooting — there is nothing to
-// click through to (see main.go's doc comment for why: this agent runs on
-// end-user devices, not admin machines, so there's no dashboard link here).
+// custom-painted, borderless window laid out to match the SOAR web app's
+// own Workspace Profile modal styling (bold name, muted slug below, a pair
+// of pills, bordered brand-blue outline, boxed sections) so the native tray
+// experience reads as the same product as the dashboard — banner logo top
+// left, device name/workspace slug stacked underneath, rather than a
+// centered text title.
+//
+// Mostly informational/troubleshooting — there is still no "open dashboard"
+// link (see main.go's doc comment for why: this agent runs on end-user
+// devices, not admin machines) — but not purely read-only any more: the
+// "Force report"/"Force evaluate compliance" buttons let the person sitting
+// at this device kick off an out-of-cycle report/evaluation without waiting
+// for the next scheduled tick. Neither button calls the backend from this
+// process directly (see triggerForceReport/triggerForceEvaluate, main.go) —
+// they just signal the main service, which is the one that's actually
+// authenticated.
 //
 // Built as a second borderless top-level window (WS_POPUP) rather than a
 // dialog resource or any GUI toolkit, painted with the same raw GDI calls
@@ -66,6 +75,27 @@ const (
 
 	diNormal = 0x0003 // DrawIconEx: draw both mask and image
 
+	// imageBitmap/lrCreateDibSection back loadBannerBitmap's LoadImageW call
+	// — LR_CREATEDIBSECTION asks Windows to hand back a DIB section (rather
+	// than a device-dependent bitmap) so the loaded handle is safe to select
+	// into any memory DC regardless of the current display's color depth.
+	imageBitmap        = 0
+	lrCreateDibSection = 0x00002000
+	srcCopy            = 0x00CC0020 // BitBlt/StretchBlt ROP: straight copy, no masking
+	halftoneStretchMode = 4         // STRETCH_HALFTONE — best downscale quality of the four GDI stretch modes
+
+	// bannerRasterW/bannerRasterH are the exact pixel dimensions the two
+	// embedded banner_*.bmp assets were rasterized at (see tray/icons —
+	// generated from applivery-bp-login.svg via cairosvg at 1.5x its native
+	// 673x64 viewBox, ~4x supersampled relative to the card's actual display
+	// size so StretchBlt's HALFTONE downscale stays crisp at every DPI this
+	// card already scales for). Hardcoded rather than queried via
+	// GetObjectW/BITMAP at load time — this repo controls both assets
+	// exactly, and skipping that call is one fewer new GDI struct to get
+	// wrong with no local Windows build to verify it against.
+	bannerRasterW = 1010
+	bannerRasterH = 96
+
 	cardClassName     = "ApplivierySOARCardWndClass"
 	cardCornerRadius  = 16
 	cardPadX          = 24
@@ -83,6 +113,16 @@ var (
 	procDrawIconEx      = moduser32.NewProc("DrawIconEx")
 	procPostMessageW    = moduser32.NewProc("PostMessageW")
 	procScreenToClient  = moduser32.NewProc("ScreenToClient")
+
+	// Banner bitmap plumbing (loadBannerBitmap/paintCard's drawKindBitmap
+	// case) — gdi.go doesn't declare these since nothing else in this repo
+	// draws a bitmap; CreateCompatibleDC/StretchBlt/SetStretchBltMode/DeleteDC
+	// are the standard "select a bitmap into a memory DC, blit from it"
+	// sequence every Win32 image-drawing example uses.
+	procCreateCompatibleDC = modgdi32.NewProc("CreateCompatibleDC")
+	procDeleteDC           = modgdi32.NewProc("DeleteDC")
+	procStretchBlt         = modgdi32.NewProc("StretchBlt")
+	procSetStretchBltMode  = modgdi32.NewProc("SetStretchBltMode")
 )
 
 // Color palette — matches frontend/src/assets/styles/bluesky-tokens.css
@@ -151,19 +191,21 @@ const (
 	drawKindPill
 	drawKindFill // solid rect fill — dividers, section dots, the risk bar
 	drawKindIcon
+	drawKindBitmap // the header banner logo — see loadBannerBitmap
 )
 
 type drawItem struct {
-	kind       drawKind
-	rect       winRect
-	text       string
-	font       uintptr
-	color      uintptr
-	bgColor    uintptr
-	align      uintptr
-	radius     int32
-	outline    bool
-	iconHandle uintptr
+	kind         drawKind
+	rect         winRect
+	text         string
+	font         uintptr
+	color        uintptr
+	bgColor      uintptr
+	align        uintptr
+	radius       int32
+	outline      bool
+	iconHandle   uintptr
+	bitmapHandle uintptr
 }
 
 var (
@@ -177,6 +219,18 @@ var (
 	cardItems           []drawItem
 	cardCloseRect       winRect
 	cardIconHandle      uintptr
+	// cardBannerHandle is the current theme's loaded header banner bitmap —
+	// reloaded (and the previous handle freed) at the top of every showCard()
+	// call, same lifetime as cardIsLight itself, since the light/dark variant
+	// depends on the theme read at that same moment.
+	cardBannerHandle uintptr
+	// cardForceReportRect/cardForceEvaluateRect mirror cardCloseRect's exact
+	// hit-testing pattern (wmNcHitTest excludes them from the drag/caption
+	// region, wmLButtonDown fires the action) — see cardCloseRect's usage
+	// there for why a borderless WS_POPUP card needs this for every
+	// clickable region rather than relying on real button controls.
+	cardForceReportRect   winRect
+	cardForceEvaluateRect winRect
 
 	fontTitle   uintptr
 	fontSection uintptr
@@ -225,6 +279,61 @@ func loadCardIcon(light bool, size int32) uintptr {
 	}
 	h, _, _ := procLoadImageW.Call(0, uintptr(unsafe.Pointer(pathPtr)), uintptr(imageIcon), uintptr(size), uintptr(size), uintptr(lrLoadFromFile))
 	return h
+}
+
+// loadBannerBitmap loads the embedded header banner (extracted to a temp
+// .bmp file by main.go's extractIcon — same mechanism as the tray/card
+// icons, just a different file extension) at its native bannerRasterW x
+// bannerRasterH resolution. LR_CREATEDIBSECTION (see its const doc comment)
+// is what makes the returned handle safe to SelectObject into the memory DC
+// paintCard's drawKindBitmap case creates for the StretchBlt. Returns 0 on
+// any failure — paintCard's bitmap case tolerates a zero handle the same
+// way DrawIconEx already tolerates one elsewhere on this card (nothing
+// visible is drawn, nothing crashes).
+func loadBannerBitmap(light bool) uintptr {
+	path := darkBannerPath
+	if light {
+		path = lightBannerPath
+	}
+	if path == "" {
+		return 0
+	}
+	pathPtr, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return 0
+	}
+	h, _, _ := procLoadImageW.Call(0, uintptr(unsafe.Pointer(pathPtr)), uintptr(imageBitmap), 0, 0, uintptr(lrLoadFromFile|lrCreateDibSection))
+	return h
+}
+
+// ptInRect is the shared hit-test used by wmNcHitTest (to exclude a
+// clickable rect from the drag/caption region) and wmLButtonDown (to fire
+// its action) for every button on this card — cardCloseRect,
+// cardForceReportRect, cardForceEvaluateRect.
+func ptInRect(pt point, r winRect) bool {
+	return pt.x >= r.left && pt.x <= r.right && pt.y >= r.top && pt.y <= r.bottom
+}
+
+// addActionButtons lays out the "Force report" / "Force evaluate
+// compliance" pair side by side, full-width, right under the header. Drawn
+// as drawKindPill rows like the rest of the card's badges, but with a
+// smaller corner radius (s(8) vs the s(11)/s(13) used by status pills) so
+// they read as rectangular buttons rather than another status indicator —
+// the primary action (evaluate) solid brand-blue, the secondary (report)
+// an outline in the same style as addHeroPills' left-hand outline pill.
+func addActionButtons() {
+	h := s(32)
+	gap := s(10)
+	btnW := (cardWidthPx - s(cardPadX)*2 - gap) / 2
+	top := cardCursorY
+	cardForceReportRect = winRect{left: s(cardPadX), top: top, right: s(cardPadX) + btnW, bottom: top + h}
+	cardForceEvaluateRect = winRect{left: s(cardPadX) + btnW + gap, top: top, right: s(cardPadX) + btnW + gap + btnW, bottom: top + h}
+	textAlign := dtCenter | dtVCenter | dtSingleLine | dtEndEllipsis
+	cardItems = append(cardItems,
+		drawItem{kind: drawKindPill, rect: cardForceReportRect, text: "Force report", font: fontPill, color: cardPrimaryTextColor(cardIsLight), bgColor: cardBorderColor(cardIsLight), align: textAlign, radius: s(8), outline: true},
+		drawItem{kind: drawKindPill, rect: cardForceEvaluateRect, text: "Force evaluate compliance", font: fontPill, color: colWhite, bgColor: colBrand, align: textAlign, radius: s(8)},
+	)
+	cardCursorY = top + h + s(16)
 }
 
 func addDivider() {
@@ -386,15 +495,19 @@ func buildCardContent() {
 	// left to truncate — it stays on the text items purely as a safety net
 	// for whatever's left over after the 90%-of-screen cap.
 	cardWidthPx = s(cardMinWidth)
-	var subtitle string
+	deviceNameText := "This device"
+	var slugText string
 	if err == nil && cache != nil {
-		subtitle = cache.WorkspaceSlug
 		if cache.DeviceName != "" {
-			subtitle = cache.DeviceName + " · " + subtitle
+			deviceNameText = cache.DeviceName
 		}
+		slugText = cache.WorkspaceSlug
 		if screenDC, _, _ := procGetDC.Call(0); screenDC != 0 {
 			needed := cardWidthPx
-			if w := measureTextWidthPx(screenDC, fontSmall, subtitle) + s(cardPadX)*2; w > needed {
+			if w := measureTextWidthPx(screenDC, fontTitle, deviceNameText) + s(cardPadX)*2; w > needed {
+				needed = w
+			}
+			if w := measureTextWidthPx(screenDC, fontSmall, slugText) + s(cardPadX)*2; w > needed {
 				needed = w
 			}
 			if cache.Compliance.Available {
@@ -416,16 +529,21 @@ func buildCardContent() {
 		}
 	}
 
-	titleH := s(24)
+	// Header: banner logo top-left (replacing the old centered "Applivery
+	// SOAR" text title), close button top-right on the same row, then the
+	// device name (bold, "same font type" as the old title per the brand
+	// reference this layout follows) and workspace slug stacked left-aligned
+	// underneath — mirrors the SOAR web app's own Workspace Profile modal
+	// styling (bold name, muted slug below) without literally centering
+	// everything the way that modal does, since the banner is explicitly
+	// top-left here rather than centered.
+	bannerH := s(22)
+	bannerW := int32(float64(bannerH) * float64(bannerRasterW) / float64(bannerRasterH))
 	cardItems = append(cardItems, drawItem{
-		kind:  drawKindText,
-		rect:  winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX), bottom: cardCursorY + titleH},
-		text:  "Applivery SOAR",
-		font:  fontTitle,
-		color: cardPrimaryTextColor(light),
-		align: dtCenter | dtVCenter | dtSingleLine,
+		kind:         drawKindBitmap,
+		rect:         winRect{left: s(cardPadX), top: cardCursorY, right: s(cardPadX) + bannerW, bottom: cardCursorY + bannerH},
+		bitmapHandle: cardBannerHandle,
 	})
-	cardCursorY += titleH + s(2)
 
 	cardCloseRect = winRect{left: cardWidthPx - s(36), top: s(12), right: cardWidthPx - s(12), bottom: s(12) + s(24)}
 	cardItems = append(cardItems, drawItem{
@@ -436,6 +554,34 @@ func buildCardContent() {
 		color: cardMutedTextColor(),
 		align: dtCenter | dtVCenter | dtSingleLine,
 	})
+	cardCursorY += bannerH + s(14)
+
+	deviceNameH := s(24)
+	cardItems = append(cardItems, drawItem{
+		kind:  drawKindText,
+		rect:  winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX), bottom: cardCursorY + deviceNameH},
+		text:  deviceNameText,
+		font:  fontTitle,
+		color: cardPrimaryTextColor(light),
+		align: dtLeft | dtVCenter | dtSingleLine | dtEndEllipsis,
+	})
+	cardCursorY += deviceNameH + s(2)
+
+	if slugText != "" {
+		slugH := s(18)
+		cardItems = append(cardItems, drawItem{
+			kind:  drawKindText,
+			rect:  winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX), bottom: cardCursorY + slugH},
+			text:  slugText,
+			font:  fontSmall,
+			color: cardMutedTextColor(),
+			align: dtLeft | dtVCenter | dtSingleLine | dtEndEllipsis,
+		})
+		cardCursorY += slugH + s(2)
+	}
+	cardCursorY += s(12)
+
+	addActionButtons()
 
 	if err != nil || cache == nil {
 		subtitleH := s(18)
@@ -451,17 +597,6 @@ func buildCardContent() {
 		cardHeight = cardCursorY + s(cardPadY)
 		return
 	}
-
-	subtitleH := s(18)
-	cardItems = append(cardItems, drawItem{
-		kind:  drawKindText,
-		rect:  winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX), bottom: cardCursorY + subtitleH},
-		text:  subtitle,
-		font:  fontSmall,
-		color: cardMutedTextColor(),
-		align: dtCenter | dtVCenter | dtSingleLine | dtEndEllipsis,
-	})
-	cardCursorY += subtitleH + s(14)
 
 	comp := cache.Compliance
 	statusBg, statusFg, statusText := colSuccess, colWhite, "Compliant"
@@ -606,6 +741,17 @@ func showCard() {
 	}
 
 	cardIsLight = isLightTheme()
+
+	// Reload the banner bitmap for whatever theme was just detected —
+	// buildCardContent (called below) reads cardBannerHandle directly, so
+	// this has to happen before that call. The previous handle (if any,
+	// e.g. from a prior open under the other theme) is freed first to avoid
+	// leaking a GDI bitmap handle on every card open.
+	if cardBannerHandle != 0 {
+		procDeleteObject.Call(cardBannerHandle)
+	}
+	cardBannerHandle = loadBannerBitmap(cardIsLight)
+
 	cardScale = 1.0
 	// GetDpiForSystem (Windows 10 1607+, no args) reports the system DPI —
 	// combined with the Per-Monitor-v2 process awareness set in main(),
@@ -678,6 +824,18 @@ func paintCard(hdc uintptr) {
 			w := r.right - r.left
 			h := r.bottom - r.top
 			procDrawIconEx.Call(hdc, uintptr(r.left), uintptr(r.top), item.iconHandle, uintptr(w), uintptr(h), 0, 0, uintptr(diNormal))
+		case drawKindBitmap:
+			if item.bitmapHandle != 0 {
+				if memDC, _, _ := procCreateCompatibleDC.Call(hdc); memDC != 0 {
+					oldBmp, _, _ := procSelectObject.Call(memDC, item.bitmapHandle)
+					procSetStretchBltMode.Call(hdc, uintptr(halftoneStretchMode))
+					w := r.right - r.left
+					h := r.bottom - r.top
+					procStretchBlt.Call(hdc, uintptr(r.left), uintptr(r.top), uintptr(w), uintptr(h), memDC, 0, 0, uintptr(bannerRasterW), uintptr(bannerRasterH), uintptr(srcCopy))
+					procSelectObject.Call(memDC, oldBmp)
+					procDeleteDC.Call(memDC)
+				}
+			}
 		case drawKindPill:
 			if item.outline {
 				roundRectStroke(hdc, &r, item.radius, item.bgColor, s(1))
@@ -739,17 +897,21 @@ func cardWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		if uint32(ret) == htClient {
 			pt := point{x: int32(int16(uint32(lParam) & 0xFFFF)), y: int32(int16(uint32(lParam) >> 16))}
 			procScreenToClient.Call(hwnd, uintptr(unsafe.Pointer(&pt)))
-			onCloseButton := pt.x >= cardCloseRect.left && pt.x <= cardCloseRect.right && pt.y >= cardCloseRect.top && pt.y <= cardCloseRect.bottom
-			if !onCloseButton {
+			onButton := ptInRect(pt, cardCloseRect) || ptInRect(pt, cardForceReportRect) || ptInRect(pt, cardForceEvaluateRect)
+			if !onButton {
 				return htCaption
 			}
 		}
 		return ret
 	case wmLButtonDown:
-		x := int32(int16(uint32(lParam) & 0xFFFF))
-		y := int32(int16(uint32(lParam) >> 16))
-		if x >= cardCloseRect.left && x <= cardCloseRect.right && y >= cardCloseRect.top && y <= cardCloseRect.bottom {
+		pt := point{x: int32(int16(uint32(lParam) & 0xFFFF)), y: int32(int16(uint32(lParam) >> 16))}
+		switch {
+		case ptInRect(pt, cardCloseRect):
 			procPostMessageW.Call(hwnd, uintptr(wmClose), 0, 0)
+		case ptInRect(pt, cardForceReportRect):
+			triggerForceReport()
+		case ptInRect(pt, cardForceEvaluateRect):
+			triggerForceEvaluate()
 		}
 		return 0
 	case wmKeyDown:
@@ -769,6 +931,10 @@ func cardWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		if cardIconHandle != 0 {
 			procDestroyIcon.Call(cardIconHandle)
 			cardIconHandle = 0
+		}
+		if cardBannerHandle != 0 {
+			procDeleteObject.Call(cardBannerHandle)
+			cardBannerHandle = 0
 		}
 		cardHwnd = 0
 		return 0

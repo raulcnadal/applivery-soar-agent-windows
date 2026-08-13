@@ -15,6 +15,7 @@ package agentstatus
 import (
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // AgentStatusPolicy/AgentStatusViolation/AgentStatusCompliance/
@@ -98,4 +99,48 @@ func Dir() string {
 // CachePath returns the full path to status.json.
 func CachePath() string {
 	return filepath.Join(Dir(), "status.json")
+}
+
+// TriggerReportPath/TriggerEvaluatePath are marker files the tray helper
+// writes to signal the main service: "the user clicked Force report" /
+// "Force evaluate compliance". The tray process deliberately has no HTTP
+// client or Managed Configuration secret of its own (see tray/main.go's
+// doc comment) — it can't call the backend directly, so it drops an empty
+// file here instead and lets the already-authenticated service act on it.
+// The main agent loop polls for these on a short interval (see
+// runAgentLoop/checkTriggers in telemetry_windows.go) and deletes each file
+// the moment it's actioned, so a stale trigger can never fire twice and a
+// tray process that writes one right as the service is mid-cycle just picks
+// it up on the very next poll. File-based rather than a named pipe/socket to
+// match this repo's existing status.json pattern — no new IPC primitive
+// either process didn't already depend on.
+func TriggerReportPath() string {
+	return filepath.Join(Dir(), "trigger-report.flag")
+}
+
+func TriggerEvaluatePath() string {
+	return filepath.Join(Dir(), "trigger-evaluate.flag")
+}
+
+// WriteTrigger creates (or refreshes) an empty marker file at path — the
+// tray's side of the signal. Content is just an RFC3339 timestamp (useful
+// when eyeballing %ProgramData%\Applivery\SOAR by hand); the service side
+// only checks for the file's existence, never reads its contents.
+func WriteTrigger(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(time.Now().UTC().Format(time.RFC3339)), 0644)
+}
+
+// ConsumeTrigger reports whether a marker file exists at path and, if so,
+// deletes it and returns true — the service side of the signal. A missing
+// file (the common case, checked every couple of seconds) is not an error,
+// just "nothing to do yet".
+func ConsumeTrigger(path string) bool {
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	_ = os.Remove(path)
+	return true
 }
