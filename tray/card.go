@@ -328,7 +328,7 @@ func addActionButtons() {
 	top := cardCursorY
 	cardForceReportRect = winRect{left: s(cardPadX), top: top, right: s(cardPadX) + btnW, bottom: top + h}
 	cardForceEvaluateRect = winRect{left: s(cardPadX) + btnW + gap, top: top, right: s(cardPadX) + btnW + gap + btnW, bottom: top + h}
-	textAlign := dtCenter | dtVCenter | dtSingleLine | dtEndEllipsis
+	textAlign := uintptr(dtCenter | dtVCenter | dtSingleLine | dtEndEllipsis)
 	cardItems = append(cardItems,
 		drawItem{kind: drawKindPill, rect: cardForceReportRect, text: "Force report", font: fontPill, color: cardPrimaryTextColor(cardIsLight), bgColor: cardBorderColor(cardIsLight), align: textAlign, radius: s(8), outline: true},
 		drawItem{kind: drawKindPill, rect: cardForceEvaluateRect, text: "Force evaluate compliance", font: fontPill, color: colWhite, bgColor: colBrand, align: textAlign, radius: s(8)},
