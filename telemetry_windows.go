@@ -155,6 +155,15 @@ func gatherAndReport() {
 	// without needing any Managed Configuration push.
 	customCheckResults := runCustomChecks(fetchCustomChecks(baseURL, config))
 
+	// Event-driven change detection ("fast lane") — see eventwatch_windows.go's
+	// top-of-file doc comment. Diffs the latest config against whichever
+	// registry watchers are currently running and starts/stops/restarts
+	// goroutines to match; those goroutines then run independently of this
+	// ticker until the next sync. Best-effort like everything else in this
+	// function — a poll failure here just means this cycle's watcher state
+	// doesn't change, not that the report itself fails.
+	syncEventWatches(baseURL, config)
+
 	reportURL := baseURL.ResolveReference(&url.URL{Path: "/api/device-data/report"}).String()
 	payload := DeviceData{
 		Platform:           "windows",
