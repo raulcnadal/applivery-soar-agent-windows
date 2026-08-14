@@ -29,6 +29,17 @@ jobs:
       - name: Install WiX Toolset v4
         run: dotnet tool install --global wix --version "4.*"
 
+      # github.com/0xrawsec/golang-etw (added for the ETW event-driven
+      # detection watcher, etw_windows.go) has its go.sum hash resolved here
+      # rather than pre-committed: the dev environment that wrote this
+      # dependency has no Go toolchain / network route to the module proxy
+      # to compute it locally. `go mod tidy` scans the source for the new
+      # import and fills in go.mod/go.sum using this runner's real network
+      # access. Safe to run on every build — a no-op once a maintainer runs
+      # it locally and commits the fully-resolved go.sum.
+      - name: Tidy Go modules
+        run: go mod tidy
+
       # goversioninfo turns versioninfo/*.json into a resource.syso next to
       # each package's main.go — `go build` links in any *.syso file it
       # finds in a package directory automatically, no extra build flags

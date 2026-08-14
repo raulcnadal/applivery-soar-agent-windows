@@ -161,21 +161,29 @@ var (
 
 // syncEventWatches is called once per report cycle from gatherAndReport
 // (telemetry_windows.go), right alongside the existing custom-checks poll.
-// It diffs the freshly polled config against activeWatchers: starts watchers
-// for new keys, restarts ones whose registry target changed, and stops ones
-// that were deleted/disabled/changed to an unsupported watchType.
+// It polls the config exactly once, then hands the full list off to each
+// watchType's own sync function — syncRegistryWatches here, syncEtwWatches
+// in etw_windows.go — so adding a third watchType later only means adding a
+// third dispatch line, not touching the polling itself.
 func syncEventWatches(baseURL *url.URL, config Config) {
 	watches := fetchEventWatches(baseURL, config)
+	syncRegistryWatches(watches)
+	syncEtwWatches(watches)
+}
 
+// syncRegistryWatches diffs the freshly polled config against
+// activeWatchers: starts watchers for new keys, restarts ones whose
+// registry target changed, and stops ones that were deleted/disabled/
+// changed to a different watchType.
+func syncRegistryWatches(watches []EventWatchDef) {
 	watchManagerMu.Lock()
 	defer watchManagerMu.Unlock()
 
 	seen := make(map[string]bool, len(watches))
 	for _, w := range watches {
 		if w.WatchType != "registryKey" {
-			// Not (yet) supported by this agent build — e.g. a future
-			// "etwProvider" watchType. Skip silently; an admin authoring one
-			// today would only affect agent builds that understand it.
+			// Owned by a different sync function (e.g. "etwProvider" —
+			// syncEtwWatches in etw_windows.go). Skip silently here.
 			continue
 		}
 		seen[w.Key] = true
