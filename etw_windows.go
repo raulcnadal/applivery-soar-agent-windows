@@ -95,8 +95,8 @@ func syncEtwWatches(watches []EventWatchDef) {
 			// (workspaceSlug, platform, key) unique constraint), so there's
 			// no risk of an ETW watch and a registry watch colliding on the
 			// same debounce timer.
-			watcherDebouncer.bump(watchKey, time.Duration(debounceMs)*time.Millisecond, func() {
-				notifyEventFired(watchKey)
+			watcherDebouncer.bump(watchKey, time.Duration(debounceMs)*time.Millisecond, func(rawEventCount int) {
+				notifyEventFired(watchKey, rawEventCount)
 			})
 		})
 		if nw != nil {

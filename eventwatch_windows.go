@@ -60,15 +60,18 @@ type EventWatchDef struct {
 
 // fetchEventWatches mirrors fetchCustomChecks (customchecks_windows.go)
 // field-for-field: same client timeout, same header pair, same
-// "log and return nil on any failure, let the next cycle retry" behavior.
-func fetchEventWatches(baseURL *url.URL, config Config) []EventWatchDef {
+// "log and return nil/0 on any failure, let the next cycle retry" behavior.
+// Second return value is the Phase 4 remoteIntervalSec override (0 = none —
+// see backend's GET /api/device-data/event-watches doc comment for why it
+// rides along in this same response instead of a separate endpoint).
+func fetchEventWatches(baseURL *url.URL, config Config) ([]EventWatchDef, int) {
 	watchesURL := baseURL.ResolveReference(&url.URL{Path: "/api/device-data/event-watches", RawQuery: "platform=windows"}).String()
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, err := http.NewRequest("GET", watchesURL, nil)
 	if err != nil {
 		log.Printf("Error building event-watches poll request: %v", err)
-		return nil
+		return nil, 0
 	}
 	req.Header.Set("X-Workspace-Slug", config.WorkspaceSlug)
 	req.Header.Set("X-Device-Report-Secret", config.ReportSecret)
@@ -76,23 +79,28 @@ func fetchEventWatches(baseURL *url.URL, config Config) []EventWatchDef {
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("Error polling event watches: %v", err)
-		return nil
+		return nil, 0
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Event watches poll returned HTTP %d — skipping this cycle's sync", resp.StatusCode)
-		return nil
+		return nil, 0
 	}
 
 	var body struct {
-		Items []EventWatchDef `json:"items"`
+		Items             []EventWatchDef `json:"items"`
+		RemoteIntervalSec *int            `json:"remoteIntervalSec"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		log.Printf("Error decoding event watches response: %v", err)
-		return nil
+		return nil, 0
 	}
-	return body.Items
+	remoteIntervalSec := 0
+	if body.RemoteIntervalSec != nil {
+		remoteIntervalSec = *body.RemoteIntervalSec
+	}
+	return body.Items, remoteIntervalSec
 }
 
 // EventNotifyPayload mirrors deviceData.schemas.ts's eventNotifyPayloadSchema.
@@ -101,6 +109,10 @@ type EventNotifyPayload struct {
 	SerialNumber    string `json:"serialNumber"`
 	WatchKey        string `json:"watchKey"`
 	ClientTimestamp string `json:"clientTimestamp,omitempty"`
+	// Phase 4 metrics — how many times bump() was called on this key before
+	// the debounce window went quiet and fired. Always >=1 when present
+	// (bump is called at least once to arm the timer in the first place).
+	RawEventCount int `json:"rawEventCount,omitempty"`
 }
 
 // --- debounce ---------------------------------------------------------
@@ -109,26 +121,33 @@ type EventNotifyPayload struct {
 // resets any pending timer for that key; only once bump hasn't been called
 // again within delay does fire actually run. One timer per watch key, so an
 // unrelated watch's activity never interferes with this one's debounce.
+// counts tracks how many times bump has been called for a key since the
+// last fire — handed to fire() as rawEventCount, the Phase 4
+// "debounce-collapse ratio" metric's raw material.
 type debouncer struct {
 	mu     sync.Mutex
 	timers map[string]*time.Timer
+	counts map[string]int
 }
 
 func newDebouncer() *debouncer {
-	return &debouncer{timers: make(map[string]*time.Timer)}
+	return &debouncer{timers: make(map[string]*time.Timer), counts: make(map[string]int)}
 }
 
-func (d *debouncer) bump(key string, delay time.Duration, fire func()) {
+func (d *debouncer) bump(key string, delay time.Duration, fire func(rawEventCount int)) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if t, ok := d.timers[key]; ok {
 		t.Stop()
 	}
+	d.counts[key]++
 	d.timers[key] = time.AfterFunc(delay, func() {
 		d.mu.Lock()
+		count := d.counts[key]
 		delete(d.timers, key)
+		delete(d.counts, key)
 		d.mu.Unlock()
-		fire()
+		fire(count)
 	})
 }
 
@@ -141,6 +160,7 @@ func (d *debouncer) stop(key string) {
 		t.Stop()
 		delete(d.timers, key)
 	}
+	delete(d.counts, key)
 }
 
 // --- watcher manager ----------------------------------------------------
@@ -164,11 +184,15 @@ var (
 // It polls the config exactly once, then hands the full list off to each
 // watchType's own sync function — syncRegistryWatches here, syncEtwWatches
 // in etw_windows.go — so adding a third watchType later only means adding a
-// third dispatch line, not touching the polling itself.
-func syncEventWatches(baseURL *url.URL, config Config) {
-	watches := fetchEventWatches(baseURL, config)
+// third dispatch line, not touching the polling itself. Returns the polled
+// remoteIntervalSec (0 = no override) so gatherAndReport can fold it into
+// this cycle's effective report interval — see telemetry_windows.go's
+// maybeResetTicker.
+func syncEventWatches(baseURL *url.URL, config Config) int {
+	watches, remoteIntervalSec := fetchEventWatches(baseURL, config)
 	syncRegistryWatches(watches)
 	syncEtwWatches(watches)
+	return remoteIntervalSec
 }
 
 // syncRegistryWatches diffs the freshly polled config against
@@ -207,8 +231,8 @@ func syncRegistryWatches(watches []EventWatchDef) {
 		}
 		watchKey := w.Key
 		nw := startRegistryWatcher(watchKey, hive, path, watchSubtree, func() {
-			watcherDebouncer.bump(watchKey, time.Duration(debounceMs)*time.Millisecond, func() {
-				notifyEventFired(watchKey)
+			watcherDebouncer.bump(watchKey, time.Duration(debounceMs)*time.Millisecond, func(rawEventCount int) {
+				notifyEventFired(watchKey, rawEventCount)
 			})
 		})
 		if nw != nil {
@@ -317,8 +341,10 @@ func startRegistryWatcher(key string, hive registry.Key, path string, watchSubtr
 // file's top-of-file doc comment for why) and POSTs to
 // /api/device-data/event-notify, reusing sendWebhook (telemetry_windows.go)
 // for the same retry/backoff/header behavior every other agent->SOAR call
-// gets.
-func notifyEventFired(watchKey string) {
+// gets. rawEventCount (Phase 4 metrics) is however many times this watch's
+// debounce timer was bumped before it went quiet — passed straight through
+// from the debouncer, not recomputed here.
+func notifyEventFired(watchKey string, rawEventCount int) {
 	config := LoadConfig()
 	if !config.IsConfigured() {
 		log.Printf("Event watch %q fired but this agent has no WorkspaceSlug/ReportSecret configured — skipping notify.", watchKey)
@@ -341,6 +367,7 @@ func notifyEventFired(watchKey string) {
 		SerialNumber:    serialNumber,
 		WatchKey:        watchKey,
 		ClientTimestamp: time.Now().UTC().Format(time.RFC3339),
+		RawEventCount:   rawEventCount,
 	}
 	sendWebhook(notifyURL, config, payload)
 }

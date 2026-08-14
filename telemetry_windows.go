@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/raulcnadal/applivery-soar-agent-windows/internal/agentstatus"
@@ -52,6 +53,55 @@ func isUsableSerial(serial string) bool {
 	}
 }
 
+// remoteIntervalSecAtomic holds the latest Phase 4 SOAR-pushed report
+// interval override (0 = none), set by gatherAndReport after each
+// syncEventWatches call (eventwatch_windows.go) and read by
+// maybeResetTicker below. Package-level + atomic rather than a return value
+// threaded through every gatherAndReport call site: gatherAndReport is
+// called from three places (runAgentLoop's initial call, its own ticker
+// case, and checkTriggers' force-report path), and all three need the same
+// "did the effective interval change, if so reset the ticker" follow-up —
+// simplest to make that follow-up its own step (maybeResetTicker) that any
+// caller can run after gatherAndReport, rather than threading a return
+// value through checkTriggers too.
+var remoteIntervalSecAtomic int32
+
+// clampInterval mirrors the floor this file has always applied: below 30s
+// is almost certainly a misconfiguration (or an admin-cleared value reading
+// back as 0), so fall back to the original 1h default rather than hammering
+// the backend.
+func clampInterval(sec int) time.Duration {
+	interval := time.Duration(sec) * time.Second
+	if interval < 30*time.Second {
+		interval = 3600 * time.Second
+	}
+	return interval
+}
+
+// maybeResetTicker recomputes the effective report interval — this
+// device's local Managed Configuration IntervalSec, unless a Phase 4
+// SOAR-pushed remoteIntervalSecAtomic override is present, in which case
+// that wins — and calls ticker.Reset only when it actually changed. This
+// closes two gaps at once: a local registry IntervalSec edit used to need
+// an agent restart to take effect (this file's own prior doc comment called
+// that "an acceptable trade-off"); now it doesn't, and neither does a
+// SOAR-pushed override changing mid-session. Called after every
+// gatherAndReport()/checkTriggers() in runAgentLoop's select loop below,
+// not just on the ticker's own tick, so a force-report or trigger check
+// also gets a chance to notice a change promptly.
+func maybeResetTicker(ticker *time.Ticker, current time.Duration) time.Duration {
+	sec := LoadConfig().IntervalSec
+	if remote := atomic.LoadInt32(&remoteIntervalSecAtomic); remote > 0 {
+		sec = int(remote)
+	}
+	next := clampInterval(sec)
+	if next != current {
+		log.Printf("Report interval changed: %s -> %s — resetting ticker.", current, next)
+		ticker.Reset(next)
+	}
+	return next
+}
+
 // runAgentLoop no longer takes a Config: it used to be loaded once at
 // service start and cached for the process's entire lifetime, which meant a
 // Managed Configuration push (registry write) landing after the service was
@@ -59,18 +109,13 @@ func isUsableSerial(serial string) bool {
 // gatherAndReport now reloads the registry key fresh on every tick — same
 // cadence Custom Device Checks already used — so a Policy/script deployed
 // after install takes effect on the very next cycle with no restart needed.
-// The initial load here only fixes the ticker's own interval for this
-// process's lifetime; IntervalSec changes still need a restart to apply,
-// which is an acceptable trade-off since a stuck/wrong interval is far less
-// disruptive than "never picks up new config at all".
+// The report ticker itself now also hot-reloads via maybeResetTicker above
+// (Phase 4) — IntervalSec changes, local or SOAR-pushed, take effect on the
+// next loop iteration instead of needing a restart.
 func runAgentLoop(stopChan <-chan struct{}) {
 	log.Println("Agent loop started. Reporting data...")
 
-	initial := LoadConfig()
-	interval := time.Duration(initial.IntervalSec) * time.Second
-	if interval < 30*time.Second {
-		interval = 3600 * time.Second
-	}
+	interval := clampInterval(LoadConfig().IntervalSec)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -79,13 +124,16 @@ func runAgentLoop(stopChan <-chan struct{}) {
 	defer triggerTicker.Stop()
 
 	gatherAndReport()
+	interval = maybeResetTicker(ticker, interval)
 
 	for {
 		select {
 		case <-ticker.C:
 			gatherAndReport()
+			interval = maybeResetTicker(ticker, interval)
 		case <-triggerTicker.C:
 			checkTriggers()
+			interval = maybeResetTicker(ticker, interval)
 		case <-stopChan:
 			log.Println("Agent loop received stop signal. Shutting down gracefully.")
 			return
@@ -157,12 +205,15 @@ func gatherAndReport() {
 
 	// Event-driven change detection ("fast lane") — see eventwatch_windows.go's
 	// top-of-file doc comment. Diffs the latest config against whichever
-	// registry watchers are currently running and starts/stops/restarts
-	// goroutines to match; those goroutines then run independently of this
-	// ticker until the next sync. Best-effort like everything else in this
-	// function — a poll failure here just means this cycle's watcher state
-	// doesn't change, not that the report itself fails.
-	syncEventWatches(baseURL, config)
+	// registry/ETW watchers are currently running and starts/stops/restarts
+	// to match; those watchers then run independently of this ticker until
+	// the next sync. Best-effort like everything else in this function — a
+	// poll failure here just means this cycle's watcher state doesn't
+	// change, not that the report itself fails. The returned remoteIntervalSec
+	// (Phase 4, 0 = no override) is stashed for maybeResetTicker to pick up
+	// right after this function returns (runAgentLoop's select loop).
+	remoteIntervalSec := syncEventWatches(baseURL, config)
+	atomic.StoreInt32(&remoteIntervalSecAtomic, int32(remoteIntervalSec))
 
 	reportURL := baseURL.ResolveReference(&url.URL{Path: "/api/device-data/report"}).String()
 	payload := DeviceData{
