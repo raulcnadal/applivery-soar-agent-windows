@@ -196,9 +196,14 @@ scripts are shelled out to for the built-in telemetry (Custom Device Checks'
    "Windows 11, version 26H1 · Pro" line in the device's Overview tab.
 4. **BitLocker status** — `root\CIMv2\Security\MicrosoftVolumeEncryption`.
 5. **Firewall status** — `SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile`.
-6. **Installed software** (when `ReportApps=1`) — 64-bit, 32-bit
-   (`WOW6432Node`), and per-user `Uninstall` registry keys, deduplicated into
-   clean name/version pairs.
+6. **Installed software** (when `ReportApps=1`) — `winget list` when
+   available (preferred: its `Id` matches App Lists' Winget search source
+   exactly), otherwise 64-bit, 32-bit (`WOW6432Node`), and per-user
+   `Uninstall` registry keys, deduplicated into clean name/version pairs and
+   tagged `origin: "msi"`. Either way, AppX/Store packages (Calculator,
+   Store-installed apps, and other UWP apps — invisible to both winget and
+   the registry) are enumerated separately via PowerShell
+   `Get-AppxPackage -AllUsers` and appended, tagged `origin: "store"`.
 
 A serial number that's empty or a known placeholder (`UNKNOWN`,
 `To Be Filled By O.E.M.`, `Default string`, etc.) is treated as unusable —
@@ -272,10 +277,13 @@ rather than wiping it.
   "platform": "windows",
   "serialNumber": "PF3ABCDE",
   "apps": [
-    { "identifier": "Google Chrome", "name": "Google Chrome", "version": "125.0.6422.113" }
+    { "identifier": "Google Chrome", "name": "Google Chrome", "version": "125.0.6422.113", "origin": "msi" },
+    { "identifier": "microsoft.windowscalculator", "name": "Microsoft.WindowsCalculator", "version": "11.2503.0.0", "origin": "store" }
   ]
 }
 ```
+
+`origin` is optional — `"msi"` for classic Win32 installer apps (winget/registry-sourced), `"store"` for AppX/UWP packages (PowerShell `Get-AppxPackage`-sourced). Omitted entirely on older agent builds that predate this field; the backend treats a missing `origin` the same as it always has.
 
 ---
 
