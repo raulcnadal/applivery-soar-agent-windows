@@ -27,6 +27,18 @@ type Config struct {
 	// indefinitely, and its absence here is normal/expected for any device
 	// that has already completed registration.
 	BootstrapToken string
+	// EnrollmentSecret — self-service mTLS enrollment (Phase E addendum,
+	// mtls_windows.go's ensureSelfServiceEnrollment). Unlike BootstrapToken,
+	// this is NOT per-device or one-time: it's the SAME value pushed to
+	// every device in the fleet via this same Managed Configuration, only
+	// used when BootstrapToken is absent. Only takes effect if the
+	// workspace's self-service mode is "silent" or "approval" (Settings >
+	// mTLS) — a device presenting it is still checked against Applivery's
+	// live device list server-side, and either issued a certificate
+	// immediately (silent) or queued for admin approval. Like
+	// BootstrapToken, not expected to stay meaningful after this device has
+	// completed enrollment (it keeps renewing on its own cert from then on).
+	EnrollmentSecret string
 }
 
 // IsConfigured reports whether enough Managed Configuration was found to
@@ -71,6 +83,9 @@ func LoadConfig() Config {
 	if val, _, err := k.GetStringValue("BootstrapToken"); err == nil && val != "" {
 		config.BootstrapToken = val
 	}
+	if val, _, err := k.GetStringValue("EnrollmentSecret"); err == nil && val != "" {
+		config.EnrollmentSecret = val
+	}
 
 	if val, _, err := k.GetIntegerValue("ReportBitLocker"); err == nil {
 		config.ReportBitLocker = (val == 1)
@@ -86,8 +101,8 @@ func LoadConfig() Config {
 	}
 
 	log.Printf(
-		"Config loaded: BaseURL=%s WorkspaceSlug=%s ReportSecret=%s BootstrapToken=%s ReportBitLocker=%v ReportFirewall=%v ReportApps=%v IntervalSec=%d",
-		config.BaseURL, maskEmpty(config.WorkspaceSlug), maskSecret(config.ReportSecret), maskSecret(config.BootstrapToken), config.ReportBitLocker, config.ReportFirewall, config.ReportApps, config.IntervalSec,
+		"Config loaded: BaseURL=%s WorkspaceSlug=%s ReportSecret=%s BootstrapToken=%s EnrollmentSecret=%s ReportBitLocker=%v ReportFirewall=%v ReportApps=%v IntervalSec=%d",
+		config.BaseURL, maskEmpty(config.WorkspaceSlug), maskSecret(config.ReportSecret), maskSecret(config.BootstrapToken), maskSecret(config.EnrollmentSecret), config.ReportBitLocker, config.ReportFirewall, config.ReportApps, config.IntervalSec,
 	)
 
 	return config

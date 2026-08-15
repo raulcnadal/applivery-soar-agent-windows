@@ -169,6 +169,7 @@ set, the agent logs a warning each cycle and reports nothing.
 | `WorkspaceSlug` | String | *(none — required)* | Your workspace identifier. |
 | `ReportSecret` | String | *(none — required)* | Device-report webhook secret (Settings → Device Data Webhook → Generate webhook secret). |
 | `BootstrapToken` | String | *(none — optional, one-time)* | mTLS registration token (Settings → mTLS → mint a token for this device's serial number). Only needed for this device's very first registration — see [mTLS Agent Authentication](#mtls-agent-authentication) below. Safe to leave unset if your workspace hasn't enabled mTLS yet. |
+| `EnrollmentSecret` | String | *(none — optional)* | Shared self-service mTLS enrollment secret — same value on every device, alternative to `BootstrapToken`. Only used if `BootstrapToken` is empty. See [Self-service enrollment](#self-service-enrollment-enrollmentsecret) below. |
 | `IntervalSec` | DWORD | `3600` | Reporting interval in seconds (values under 30 fall back to the default). |
 | `ReportBitLocker` | DWORD (1/0) | `1` | Include BitLocker disk-encryption status. |
 | `ReportFirewall` | DWORD (1/0) | `1` | Include Windows Firewall status. |
@@ -211,6 +212,33 @@ device that never receives a `BootstrapToken`.
    auth it already has (the legacy secret, or its current not-yet-expired
    certificate) and retries on the next report cycle — never blocks or fails
    a report because of this.
+
+### Self-service enrollment (`EnrollmentSecret`)
+
+For fleets with no per-device provisioning step to hand each device its own
+`BootstrapToken`. Push the SAME `EnrollmentSecret` value to every device via
+this same Managed Configuration instead — only takes effect if
+`BootstrapToken` is empty, and only if the workspace has enabled self-service
+enrollment (Settings > mTLS > Self-Service Enrollment, mode "Silent" or
+"Approval required").
+
+1. The agent POSTs `/api/device-mtls/enroll` with its own locally-detected
+   serial number, the CSR, and `X-Enrollment-Secret`. The backend
+   additionally checks that serial number against Applivery UEM's own live
+   device list before issuing anything — see `mtlsEnrollment.service.ts`
+   (main SOAR repo) for the full security model, which is meaningfully
+   weaker than the per-device `BootstrapToken` path above (a serial number
+   isn't a secret) and is opt-in for that reason.
+2. **Silent mode:** a certificate comes back immediately, same as the
+   `BootstrapToken` flow.
+3. **Approval-required mode:** the backend replies 202/pending; the agent
+   remembers the same keypair/CSR and polls
+   `GET /api/device-mtls/enroll/status` on each subsequent report cycle
+   until an admin approves (certificate issued) or rejects (the agent
+   submits a fresh request next cycle) it.
+4. Once issued, this device behaves identically to one that enrolled via
+   `BootstrapToken` — same keystore, same renewal loop, no further use of
+   `EnrollmentSecret`.
 
 ---
 
@@ -438,6 +466,13 @@ both MSIs attached.
   set:** check `agent.log` for lines starting `mTLS:` — the most common
   causes are the token having already expired/been consumed (mint a fresh
   one), or the workspace not yet having a Certificate Authority configured
+* **Self-service enrollment (`EnrollmentSecret`) never seems to happen:**
+  check that `BootstrapToken` is genuinely empty (it always takes priority),
+  that the workspace's self-service mode isn't "Disabled" (Settings > mTLS),
+  and that this device's serial number is currently visible in Applivery's
+  own device list — the backend rejects a serial number it doesn't
+  recognize as enrolled. In "Approval required" mode, also check Settings >
+  mTLS for a pending request awaiting your click.
   in Settings → mTLS (registration fails closed with a clear log line in
   that case, same tolerance as every other best-effort step in this agent —
   it just keeps using `ReportSecret` and retries next cycle).
