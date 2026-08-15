@@ -167,17 +167,16 @@ set, the agent logs a warning each cycle and reports nothing.
 | :--- | :--- | :--- | :--- |
 | `BaseURL` | String | `https://soar.mi-labs.es` | Base URL of your Applivery SOAR instance. |
 | `WorkspaceSlug` | String | *(none — required)* | Your workspace identifier. |
-| `ReportSecret` | String | *(none — required)* | Device-report webhook secret (Settings → Device Data Webhook → Generate webhook secret). |
-| `BootstrapToken` | String | *(none — optional, one-time)* | mTLS registration token (Settings → mTLS → mint a token for this device's serial number). Only needed for this device's very first registration — see [mTLS Agent Authentication](#mtls-agent-authentication) below. Safe to leave unset if your workspace hasn't enabled mTLS yet. |
-| `EnrollmentSecret` | String | *(none — optional)* | Shared self-service mTLS enrollment secret — same value on every device, alternative to `BootstrapToken`. Only used if `BootstrapToken` is empty. See [Self-service enrollment](#self-service-enrollment-enrollmentsecret) below. |
+| `ReportSecret` | String | *(none — optional)* | Device-report webhook secret (Settings → Device Data Webhook → Generate webhook secret). Either this or `BootstrapToken` must be set — an mTLS-only deployment (only `BootstrapToken` set) is fully supported. |
+| `BootstrapToken` | String | *(none — optional)* | The workspace's Global Bootstrap Token (Settings → mTLS Agent Authentication → Generate). The SAME value is pushed to every device in the fleet — see [mTLS Agent Authentication](#mtls-agent-authentication) below. Safe to leave unset if your workspace hasn't enabled mTLS yet. |
 | `IntervalSec` | DWORD | `3600` | Reporting interval in seconds (values under 30 fall back to the default). |
 | `ReportBitLocker` | DWORD (1/0) | `1` | Include BitLocker disk-encryption status. |
 | `ReportFirewall` | DWORD (1/0) | `1` | Include Windows Firewall status. |
 | `ReportApps` | DWORD (1/0) | `0` | Include the full installed-application inventory. |
 
-Settings → Device Data Webhook generates a ready-to-import `.reg` file with
-all of these pre-filled for your workspace — you shouldn't need to type any
-of this by hand.
+Settings → Device Data Webhook generates a ready-to-import `.reg`/`.ps1` file
+with all of these pre-filled for your workspace (including `BootstrapToken`,
+if one is configured) — you shouldn't need to type any of this by hand.
 
 ---
 
@@ -186,17 +185,30 @@ of this by hand.
 Starting with this build, the agent can authenticate to SOAR with a
 per-device client certificate instead of the shared `ReportSecret` — see
 `backend/docs/mtls-agent-auth-roadmap.md` (main SOAR repo) for the full
-design. This is opt-in per workspace and per device; nothing changes for a
-device that never receives a `BootstrapToken`.
+design. This is opt-in per workspace; nothing changes for a device that
+never receives a `BootstrapToken`.
 
-1. **First run with a `BootstrapToken` set:** the agent generates an ECDSA
+Registration uses a single **Global Bootstrap Token**: one value, the SAME
+on every device in the fleet, pushed via one Managed Configuration policy —
+not a per-device or one-time credential. A device proves it's allowed to
+register with that token PLUS a live check (done server-side) that its own
+serial number is currently a known, enrolled device in this workspace's
+Applivery UEM fleet. Only devices Applivery already knows about can ever
+register.
+
+1. **First run with `BootstrapToken` set:** the agent generates an ECDSA
    P-256 keypair locally (the private key never leaves the device), builds a
    CSR, and registers with the backend over plain HTTPS using the token.
-   Once registered, the token is consumed (single-use) and the issued
-   certificate + key are stored under
+   The backend validates the token, checks the device's serial number
+   against Applivery's live fleet, and — if both check out — issues a
+   certificate immediately (no admin approval step; a bootstrap token is
+   unattended by design). The issued certificate + key are stored under
    `%ProgramData%\Applivery\SOAR\mtls\` (ACL-locked to SYSTEM and local
    Administrators only — this is a v1 file-based keystore, not the real
    Windows Certificate Store; see the roadmap doc's disclosed-gap callout).
+   A device that already has an active certificate can never be silently
+   re-registered this way — the backend rejects it — so leaving
+   `BootstrapToken` in place after enrollment is harmless.
 2. **Every report cycle afterward:** if a valid certificate is loaded, ALL
    requests to the backend (reports, custom-checks poll, event-watches poll,
    agent-status, force-evaluate) present it via mTLS instead of sending
@@ -208,37 +220,20 @@ device that never receives a `BootstrapToken`.
    authenticate the renewal call — no bootstrap token is ever needed again
    after the first successful registration.
 4. **If registration/renewal fails** (backend unreachable, no CA configured
-   yet, token expired/already used), the agent just keeps using whatever
-   auth it already has (the legacy secret, or its current not-yet-expired
-   certificate) and retries on the next report cycle — never blocks or fails
-   a report because of this.
+   yet, token wrong, serial number not yet visible to Applivery), the agent
+   just keeps using whatever auth it already has (the legacy secret, or its
+   current not-yet-expired certificate) and retries on the next report
+   cycle — never blocks or fails a report because of this.
 
-### Self-service enrollment (`EnrollmentSecret`)
+**Reverse proxy**: the proxy in front of the backend must terminate the mTLS
+handshake and forward the verified client identity via headers — Settings →
+mTLS Agent Authentication shows the exact nginx/NPM config (and the
+equivalent for Traefik/Caddy/HAProxy) plus whether the internal proxy secret
+is currently configured on this backend.
 
-For fleets with no per-device provisioning step to hand each device its own
-`BootstrapToken`. Push the SAME `EnrollmentSecret` value to every device via
-this same Managed Configuration instead — only takes effect if
-`BootstrapToken` is empty, and only if the workspace has enabled self-service
-enrollment (Settings > mTLS > Self-Service Enrollment, mode "Silent" or
-"Approval required").
-
-1. The agent POSTs `/api/device-mtls/enroll` with its own locally-detected
-   serial number, the CSR, and `X-Enrollment-Secret`. The backend
-   additionally checks that serial number against Applivery UEM's own live
-   device list before issuing anything — see `mtlsEnrollment.service.ts`
-   (main SOAR repo) for the full security model, which is meaningfully
-   weaker than the per-device `BootstrapToken` path above (a serial number
-   isn't a secret) and is opt-in for that reason.
-2. **Silent mode:** a certificate comes back immediately, same as the
-   `BootstrapToken` flow.
-3. **Approval-required mode:** the backend replies 202/pending; the agent
-   remembers the same keypair/CSR and polls
-   `GET /api/device-mtls/enroll/status` on each subsequent report cycle
-   until an admin approves (certificate issued) or rejects (the agent
-   submits a fresh request next cycle) it.
-4. Once issued, this device behaves identically to one that enrolled via
-   `BootstrapToken` — same keystore, same renewal loop, no further use of
-   `EnrollmentSecret`.
+**No macOS equivalent yet** — the macOS Agent repo has no mTLS support at
+all (still `ReportSecret`-only). A workspace enforcing mTLS today only works
+for Windows devices; flag this before enabling enforcement on a mixed fleet.
 
 ---
 
@@ -463,19 +458,19 @@ both MSIs attached.
   ```
 
 * **mTLS registration never seems to happen despite a `BootstrapToken` being
-  set:** check `agent.log` for lines starting `mTLS:` — the most common
-  causes are the token having already expired/been consumed (mint a fresh
-  one), or the workspace not yet having a Certificate Authority configured
-* **Self-service enrollment (`EnrollmentSecret`) never seems to happen:**
-  check that `BootstrapToken` is genuinely empty (it always takes priority),
-  that the workspace's self-service mode isn't "Disabled" (Settings > mTLS),
-  and that this device's serial number is currently visible in Applivery's
-  own device list — the backend rejects a serial number it doesn't
-  recognize as enrolled. In "Approval required" mode, also check Settings >
-  mTLS for a pending request awaiting your click.
-  in Settings → mTLS (registration fails closed with a clear log line in
-  that case, same tolerance as every other best-effort step in this agent —
-  it just keeps using `ReportSecret` and retries next cycle).
+  set:** first confirm `IsConfigured()` is actually letting the report loop
+  run at all — check the "Config loaded: ..." line in `agent.log`; if
+  `WorkspaceSlug` is set and EITHER `ReportSecret` or `BootstrapToken` shows
+  as "(set, N chars)", the loop runs. Then check for lines starting `mTLS:`
+  — the most common causes are: the workspace not yet having a Certificate
+  Authority configured, no Global Bootstrap Token generated yet (Settings →
+  mTLS Agent Authentication), the token value not matching what's in the
+  registry, or this device's serial number not yet visible in Applivery's
+  own device list (the backend rejects a serial number it doesn't recognize
+  as enrolled — give Applivery UEM's sync a few minutes after enrolling a
+  new device). Registration fails closed with a clear log line in every
+  case, same tolerance as every other best-effort step in this agent — it
+  just keeps using whatever auth it already has and retries next cycle.
 * **Config was just pushed but the log still shows the old values:** as of
   this build, Managed Configuration is re-read from the registry on every
   report cycle (default hourly) — no service restart needed, it'll pick it
