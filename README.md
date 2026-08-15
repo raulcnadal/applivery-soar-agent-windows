@@ -168,6 +168,7 @@ set, the agent logs a warning each cycle and reports nothing.
 | `BaseURL` | String | `https://soar.mi-labs.es` | Base URL of your Applivery SOAR instance. |
 | `WorkspaceSlug` | String | *(none — required)* | Your workspace identifier. |
 | `ReportSecret` | String | *(none — required)* | Device-report webhook secret (Settings → Device Data Webhook → Generate webhook secret). |
+| `BootstrapToken` | String | *(none — optional, one-time)* | mTLS registration token (Settings → mTLS → mint a token for this device's serial number). Only needed for this device's very first registration — see [mTLS Agent Authentication](#mtls-agent-authentication) below. Safe to leave unset if your workspace hasn't enabled mTLS yet. |
 | `IntervalSec` | DWORD | `3600` | Reporting interval in seconds (values under 30 fall back to the default). |
 | `ReportBitLocker` | DWORD (1/0) | `1` | Include BitLocker disk-encryption status. |
 | `ReportFirewall` | DWORD (1/0) | `1` | Include Windows Firewall status. |
@@ -176,6 +177,40 @@ set, the agent logs a warning each cycle and reports nothing.
 Settings → Device Data Webhook generates a ready-to-import `.reg` file with
 all of these pre-filled for your workspace — you shouldn't need to type any
 of this by hand.
+
+---
+
+## mTLS Agent Authentication
+
+Starting with this build, the agent can authenticate to SOAR with a
+per-device client certificate instead of the shared `ReportSecret` — see
+`backend/docs/mtls-agent-auth-roadmap.md` (main SOAR repo) for the full
+design. This is opt-in per workspace and per device; nothing changes for a
+device that never receives a `BootstrapToken`.
+
+1. **First run with a `BootstrapToken` set:** the agent generates an ECDSA
+   P-256 keypair locally (the private key never leaves the device), builds a
+   CSR, and registers with the backend over plain HTTPS using the token.
+   Once registered, the token is consumed (single-use) and the issued
+   certificate + key are stored under
+   `%ProgramData%\Applivery\SOAR\mtls\` (ACL-locked to SYSTEM and local
+   Administrators only — this is a v1 file-based keystore, not the real
+   Windows Certificate Store; see the roadmap doc's disclosed-gap callout).
+2. **Every report cycle afterward:** if a valid certificate is loaded, ALL
+   requests to the backend (reports, custom-checks poll, event-watches poll,
+   agent-status, force-evaluate) present it via mTLS instead of sending
+   `X-Device-Report-Secret` — the two auth modes are never mixed on the same
+   request.
+3. **Renewal is automatic and silent:** once less than a third of the
+   certificate's total validity window remains, the agent generates a fresh
+   keypair+CSR and renews using its current (still-valid) certificate to
+   authenticate the renewal call — no bootstrap token is ever needed again
+   after the first successful registration.
+4. **If registration/renewal fails** (backend unreachable, no CA configured
+   yet, token expired/already used), the agent just keeps using whatever
+   auth it already has (the legacy secret, or its current not-yet-expired
+   certificate) and retries on the next report cycle — never blocks or fails
+   a report because of this.
 
 ---
 
@@ -245,7 +280,10 @@ an explicit warning about this; use it deliberately.
 * **Headers on every request:**
   * `Content-Type: application/json` (report calls only)
   * `X-Workspace-Slug: <WorkspaceSlug>`
-  * `X-Device-Report-Secret: <ReportSecret>`
+  * `X-Device-Report-Secret: <ReportSecret>` — omitted once this device has
+    completed mTLS registration (see [mTLS Agent
+    Authentication](#mtls-agent-authentication) above); the client
+    certificate authenticates the request instead.
 
 ### Device report payload
 
@@ -396,6 +434,13 @@ both MSIs attached.
   Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Applivery\SOAR'
   ```
 
+* **mTLS registration never seems to happen despite a `BootstrapToken` being
+  set:** check `agent.log` for lines starting `mTLS:` — the most common
+  causes are the token having already expired/been consumed (mint a fresh
+  one), or the workspace not yet having a Certificate Authority configured
+  in Settings → mTLS (registration fails closed with a clear log line in
+  that case, same tolerance as every other best-effort step in this agent —
+  it just keeps using `ReportSecret` and retries next cycle).
 * **Config was just pushed but the log still shows the old values:** as of
   this build, Managed Configuration is re-read from the registry on every
   report cycle (default hourly) — no service restart needed, it'll pick it

@@ -67,14 +67,14 @@ type EventWatchDef struct {
 func fetchEventWatches(baseURL *url.URL, config Config) ([]EventWatchDef, int) {
 	watchesURL := baseURL.ResolveReference(&url.URL{Path: "/api/device-data/event-watches", RawQuery: "platform=windows"}).String()
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := mtlsHTTPClient(15 * time.Second)
 	req, err := http.NewRequest("GET", watchesURL, nil)
 	if err != nil {
 		log.Printf("Error building event-watches poll request: %v", err)
 		return nil, 0
 	}
 	req.Header.Set("X-Workspace-Slug", config.WorkspaceSlug)
-	req.Header.Set("X-Device-Report-Secret", config.ReportSecret)
+	applyLegacyAuthIfNeeded(req, config)
 
 	resp, err := client.Do(req)
 	if err != nil {

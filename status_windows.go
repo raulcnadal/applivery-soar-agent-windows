@@ -49,13 +49,13 @@ func fetchAgentStatus(baseURL *url.URL, config Config, serialNumber, platform st
 	q.Set("platform", platform)
 	statusURL.RawQuery = q.Encode()
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := mtlsHTTPClient(15 * time.Second)
 	req, err := http.NewRequest("GET", statusURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("X-Workspace-Slug", config.WorkspaceSlug)
-	req.Header.Set("X-Device-Report-Secret", config.ReportSecret)
+	applyLegacyAuthIfNeeded(req, config)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -113,14 +113,14 @@ func forceEvaluateCompliance() {
 	}
 
 	evalURL := baseURL.ResolveReference(&url.URL{Path: "/api/device-data/evaluate-now"})
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := mtlsHTTPClient(30 * time.Second)
 	req, err := http.NewRequest("POST", evalURL.String(), nil)
 	if err != nil {
 		log.Printf("Force evaluate: could not build request: %v", err)
 		return
 	}
 	req.Header.Set("X-Workspace-Slug", config.WorkspaceSlug)
-	req.Header.Set("X-Device-Report-Secret", config.ReportSecret)
+	applyLegacyAuthIfNeeded(req, config)
 
 	resp, err := client.Do(req)
 	if err != nil {

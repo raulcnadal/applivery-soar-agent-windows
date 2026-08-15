@@ -50,14 +50,14 @@ type CustomCheckResult struct {
 func fetchCustomChecks(baseURL *url.URL, config Config) []CustomCheckDef {
 	checksURL := baseURL.ResolveReference(&url.URL{Path: "/api/device-data/custom-checks", RawQuery: "platform=windows"}).String()
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := mtlsHTTPClient(15 * time.Second)
 	req, err := http.NewRequest("GET", checksURL, nil)
 	if err != nil {
 		log.Printf("Error building custom-checks poll request: %v", err)
 		return nil
 	}
 	req.Header.Set("X-Workspace-Slug", config.WorkspaceSlug)
-	req.Header.Set("X-Device-Report-Secret", config.ReportSecret)
+	applyLegacyAuthIfNeeded(req, config)
 
 	resp, err := client.Do(req)
 	if err != nil {

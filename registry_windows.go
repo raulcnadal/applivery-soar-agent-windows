@@ -18,6 +18,15 @@ type Config struct {
 	ReportFirewall  bool
 	ReportApps      bool
 	IntervalSec     int
+	// BootstrapToken — mTLS agent authentication (see mtls_windows.go and
+	// backend/docs/mtls-agent-auth-roadmap.md). A one-time credential
+	// Applivery UEM pushes alongside the rest of this Managed Configuration,
+	// consumed exactly once by this device's first successful registration
+	// (POST /api/device-mtls/register) and never needed again afterward —
+	// unlike ReportSecret above, this is NOT expected to stay populated
+	// indefinitely, and its absence here is normal/expected for any device
+	// that has already completed registration.
+	BootstrapToken string
 }
 
 // IsConfigured reports whether enough Managed Configuration was found to
@@ -59,7 +68,10 @@ func LoadConfig() Config {
 	if val, _, err := k.GetStringValue("ReportSecret"); err == nil && val != "" {
 		config.ReportSecret = val
 	}
-	
+	if val, _, err := k.GetStringValue("BootstrapToken"); err == nil && val != "" {
+		config.BootstrapToken = val
+	}
+
 	if val, _, err := k.GetIntegerValue("ReportBitLocker"); err == nil {
 		config.ReportBitLocker = (val == 1)
 	}
@@ -74,8 +86,8 @@ func LoadConfig() Config {
 	}
 
 	log.Printf(
-		"Config loaded: BaseURL=%s WorkspaceSlug=%s ReportSecret=%s ReportBitLocker=%v ReportFirewall=%v ReportApps=%v IntervalSec=%d",
-		config.BaseURL, maskEmpty(config.WorkspaceSlug), maskSecret(config.ReportSecret), config.ReportBitLocker, config.ReportFirewall, config.ReportApps, config.IntervalSec,
+		"Config loaded: BaseURL=%s WorkspaceSlug=%s ReportSecret=%s BootstrapToken=%s ReportBitLocker=%v ReportFirewall=%v ReportApps=%v IntervalSec=%d",
+		config.BaseURL, maskEmpty(config.WorkspaceSlug), maskSecret(config.ReportSecret), maskSecret(config.BootstrapToken), config.ReportBitLocker, config.ReportFirewall, config.ReportApps, config.IntervalSec,
 	)
 
 	return config

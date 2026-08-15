@@ -164,6 +164,14 @@ func gatherAndReport() {
 		return
 	}
 
+	// mTLS agent authentication (Phase B) — checks/advances this device's
+	// registration or renewal state every report cycle rather than on a
+	// separate ticker (mtls_windows.go's ensureMtlsIdentity doc comment has
+	// the full rationale). Always best-effort: never blocks or fails this
+	// report cycle, whatever auth this device currently has (legacy secret,
+	// or a valid certificate) is what sendWebhook below will use.
+	ensureMtlsIdentity()
+
 	log.Println("Gathering telemetry...")
 
 	baseURL, err := url.Parse(config.BaseURL)
@@ -291,7 +299,7 @@ func updateStatusCache(baseURL *url.URL, config Config, serialNumber string, att
 // cache feature ignored this return value entirely, so the behavior for
 // existing callers is unchanged.
 func sendWebhook(targetURL string, config Config, payload interface{}) bool {
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := mtlsHTTPClient(15 * time.Second)
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("Error marshaling JSON payload: %v", err)
@@ -308,7 +316,7 @@ func sendWebhook(targetURL string, config Config, payload interface{}) bool {
 
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Workspace-Slug", config.WorkspaceSlug)
-		req.Header.Set("X-Device-Report-Secret", config.ReportSecret)
+		applyLegacyAuthIfNeeded(req, config)
 
 		resp, err := client.Do(req)
 		if err == nil {
