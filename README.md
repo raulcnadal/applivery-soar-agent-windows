@@ -265,7 +265,18 @@ scripts are shelled out to for the built-in telemetry (Custom Device Checks'
    Installer package present). Either way, AppX/Store packages (Calculator,
    Store-installed apps, and other UWP apps — invisible to both winget and
    the registry) are enumerated separately via PowerShell
-   `Get-AppxPackage -AllUsers` and appended, tagged `origin: "store"`.
+   `Get-AppxPackage -AllUsers` and appended, tagged `origin: "store"`. For
+   each AppX package, the reported name is resolved to its real,
+   human-friendly display name (e.g. "Angry Birds 2") via
+   `Get-AppxPackageManifest` + a P/Invoke to `SHLoadIndirectString` for
+   `ms-resource:`-indirect display names — `Get-AppxPackage`'s own `Name`
+   property is just the package identity string (e.g.
+   "1ED5AEA5.4160926B82DB"), never meant for display. Falls back to that
+   identity string on any resolution failure, so a device is never left
+   with a missing app just because one package's manifest couldn't be
+   read. The reported `identifier` is unaffected either way — it's always
+   the lowercased package identity name, matching Applivery UEM's own
+   AppInventoryResults-sourced identifier for the same package.
 
 A serial number that's empty or a known placeholder (`UNKNOWN`,
 `To Be Filled By O.E.M.`, `Default string`, etc.) is treated as unusable —

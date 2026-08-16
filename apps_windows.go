@@ -257,17 +257,73 @@ func getAppsViaRegistry() []InstalledApp {
 // with exactly one matching package would otherwise serialize as a bare
 // JSON object our decoder can't parse as a list, and zero matches would
 // print nothing at all rather than "[]".
+//
+// Display-name resolution: a package's real, human-friendly name isn't
+// exposed by Get-AppxPackage at all — its own `Name` property is the
+// package IDENTITY (e.g. "1ED5AEA5.4160926B82DB" for a Store-installed
+// game), not something meant for display. The actual name lives in
+// AppxManifest.xml's <Properties><DisplayName>, which is frequently an
+// indirect resource reference ("ms-resource:AppName" or similar) rather
+// than a literal string, requiring the package's own resources.pri to
+// resolve. For each package the script below calls Get-AppxPackageManifest
+// (already proven to work under this agent's LocalSystem service context,
+// same as Get-AppxPackage itself — unlike Get-StartApps, this doesn't touch
+// the interactive Shell/Start Menu at all) to read the raw DisplayName, and
+// — only when it's an ms-resource indirect reference — resolves it via a
+// P/Invoke to shlwapi.dll's SHLoadIndirectString (a plain Win32 resource-
+// loading API, not a WinRT/shell-integration one, so it doesn't need an
+// interactive session either) using the documented
+// "@{PackageFullName?<raw ms-resource value>}" indirect-string form. Every
+// step of this is wrapped in try/catch and silently falls back to the
+// previous behavior (raw identity name as the display name) on any
+// failure — a resolution miss should never cost a device its app-inventory
+// data. `Identifier` is unaffected by any of this: it stays the lowercased
+// package identity name exactly as before, so it keeps agreeing with
+// Applivery UEM's own AppInventoryResults-sourced identifier
+// (windowsDeviceApps.service.ts) — only the display Name changes.
 func getAppsViaAppx() []InstalledApp {
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	script := `$apps = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Where-Object { -not $_.IsFramework -and -not $_.IsResourcePackage } | Select-Object Name, Version); ConvertTo-Json -InputObject $apps -Compress`
+	script := `
+Add-Type -TypeDefinition @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public class ApplveryAppxRes {
+    [DllImport("shlwapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern int SHLoadIndirectString(string pszSource, StringBuilder pszOutBuf, int cchOutBuf, IntPtr ppvReserved);
+}
+"@ -ErrorAction SilentlyContinue
+
+$pkgs = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Where-Object { -not $_.IsFramework -and -not $_.IsResourcePackage })
+$apps = @($pkgs | ForEach-Object {
+    $displayName = $null
+    try {
+        $raw = ($_ | Get-AppxPackageManifest -ErrorAction Stop).Package.Properties.DisplayName
+        if ($raw) {
+            if ($raw.ToString().StartsWith('ms-resource:')) {
+                try {
+                    $buf = New-Object System.Text.StringBuilder 1024
+                    $indirect = "@{$($_.PackageFullName)?$raw}"
+                    $hr = [ApplveryAppxRes]::SHLoadIndirectString($indirect, $buf, $buf.Capacity, [IntPtr]::Zero)
+                    if ($hr -eq 0 -and $buf.Length -gt 0) { $displayName = $buf.ToString() }
+                } catch {}
+            } else {
+                $displayName = $raw.ToString()
+            }
+        }
+    } catch {}
+    [PSCustomObject]@{ Name = $_.Name; Version = $_.Version; DisplayName = $displayName }
+})
+ConvertTo-Json -InputObject $apps -Compress
+`
 	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			log.Printf("Get-AppxPackage enumeration timed out after 45s (Store/system apps will be missing from this report)")
+			log.Printf("Get-AppxPackage enumeration timed out after 90s (Store/system apps will be missing from this report)")
 		} else {
 			log.Printf("Get-AppxPackage enumeration failed (Store/system apps will be missing from this report): %v", err)
 		}
@@ -275,23 +331,22 @@ func getAppsViaAppx() []InstalledApp {
 	}
 
 	var raw []struct {
-		Name    string `json:"Name"`
-		Version string `json:"Version"`
+		Name        string `json:"Name"`
+		Version     string `json:"Version"`
+		DisplayName string `json:"DisplayName"`
 	}
 	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &raw); err != nil {
 		log.Printf("Could not parse Get-AppxPackage output (Store/system apps will be missing from this report): %v", err)
 		return nil
 	}
 
-	// Package identity Name (e.g. "Microsoft.WindowsCalculator") rather than
-	// a human-friendly display name — Get-AppxPackage doesn't expose the
-	// latter without a separate, much slower manifest lookup per package.
-	// Lowercased as the identifier the same way this file's other two
-	// sources and the backend's own MSI/AppInventoryResults parses do (see
-	// getAppsViaRegistry above and installedApps.service.ts's
-	// fetchAndStoreInstalledApps), so the same physical app resolves to one
-	// identifier whether this device is self-reporting or being fetched
-	// live via Applivery UEM.
+	// Identifier stays the lowercased package identity Name (e.g.
+	// "microsoft.windowscalculator") exactly as before — see this function's
+	// own doc comment for why that's deliberately unchanged. Name prefers
+	// the resolved DisplayName; falls back to the identity name (today's
+	// behavior) whenever resolution didn't produce anything usable — an
+	// empty result, or (defensively) a string that still looks like an
+	// unresolved resource reference.
 	var apps []InstalledApp
 	seen := make(map[string]bool, len(raw))
 	for _, a := range raw {
@@ -304,7 +359,11 @@ func getAppsViaAppx() []InstalledApp {
 			continue
 		}
 		seen[identifier] = true
-		apps = append(apps, InstalledApp{Identifier: identifier, Name: name, Version: strings.TrimSpace(a.Version), Origin: "store"})
+		displayName := strings.TrimSpace(a.DisplayName)
+		if displayName == "" || strings.HasPrefix(strings.ToLower(displayName), "ms-resource") {
+			displayName = name
+		}
+		apps = append(apps, InstalledApp{Identifier: identifier, Name: displayName, Version: strings.TrimSpace(a.Version), Origin: "store"})
 	}
 	return apps
 }
