@@ -155,7 +155,18 @@ func ensureMtlsIdentity() {
 	id := getActiveIdentity()
 	if id == nil {
 		if config.BootstrapToken != "" {
-			registerMtlsIdentity(baseURL, config)
+			// RegisterURL, when set, decouples first-time enrollment from the
+			// mTLS vhost's health — /register never presents a client cert
+			// (see Config.RegisterURL's doc comment), so it doesn't need
+			// BaseURL's dedicated mTLS-configured domain at all. Falls back
+			// to baseURL when RegisterURL is empty (single-URL deployments).
+			registerBaseURL := baseURL
+			if config.RegisterURL != "" {
+				if parsed, err := url.Parse(config.RegisterURL); err == nil {
+					registerBaseURL = parsed
+				}
+			}
+			registerMtlsIdentity(registerBaseURL, config)
 			return
 		}
 		return // no certificate yet and no bootstrap token configured — stay on legacy auth this cycle

@@ -30,6 +30,21 @@ type Config struct {
 	// design, leaving it in place is harmless — a device that already has
 	// an active certificate is never silently re-registered.
 	BootstrapToken string
+	// RegisterURL — optional override for POST /api/device-mtls/register
+	// ONLY. Falls back to BaseURL when empty (the historical, still fully
+	// supported single-URL behavior). Exists because TLS client-certificate
+	// verification is a whole-domain nginx setting, not scoped to a path
+	// (see backend/docs/mtls-agent-auth-roadmap.md §5.5) — a workspace using
+	// mTLS needs a SEPARATE subdomain/vhost carrying the client-cert
+	// directives, and BaseURL points there once configured. But /register
+	// never presents a client cert (the bootstrap token is the credential,
+	// verifyMtlsIdentity is never applied to it) and doesn't need that
+	// vhost's health at all — so setting RegisterURL to the ordinary
+	// dashboard domain decouples first-time enrollment from whether the
+	// mTLS vhost happens to be up. /renew is the opposite: it's always
+	// gated by verifyMtlsIdentity, so it deliberately keeps using BaseURL
+	// unconditionally, never RegisterURL.
+	RegisterURL string
 }
 
 // IsConfigured reports whether enough Managed Configuration was found to
@@ -82,6 +97,9 @@ func LoadConfig() Config {
 	if val, _, err := k.GetStringValue("BootstrapToken"); err == nil && val != "" {
 		config.BootstrapToken = val
 	}
+	if val, _, err := k.GetStringValue("RegisterURL"); err == nil && val != "" {
+		config.RegisterURL = val
+	}
 
 	if val, _, err := k.GetIntegerValue("ReportBitLocker"); err == nil {
 		config.ReportBitLocker = (val == 1)
@@ -97,8 +115,8 @@ func LoadConfig() Config {
 	}
 
 	log.Printf(
-		"Config loaded: BaseURL=%s WorkspaceSlug=%s ReportSecret=%s BootstrapToken=%s ReportBitLocker=%v ReportFirewall=%v ReportApps=%v IntervalSec=%d",
-		config.BaseURL, maskEmpty(config.WorkspaceSlug), maskSecret(config.ReportSecret), maskSecret(config.BootstrapToken), config.ReportBitLocker, config.ReportFirewall, config.ReportApps, config.IntervalSec,
+		"Config loaded: BaseURL=%s RegisterURL=%s WorkspaceSlug=%s ReportSecret=%s BootstrapToken=%s ReportBitLocker=%v ReportFirewall=%v ReportApps=%v IntervalSec=%d",
+		config.BaseURL, maskEmpty(config.RegisterURL), maskEmpty(config.WorkspaceSlug), maskSecret(config.ReportSecret), maskSecret(config.BootstrapToken), config.ReportBitLocker, config.ReportFirewall, config.ReportApps, config.IntervalSec,
 	)
 
 	return config

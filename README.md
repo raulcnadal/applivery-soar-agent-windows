@@ -165,7 +165,8 @@ set, the agent logs a warning each cycle and reports nothing.
 
 | Registry Value | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `BaseURL` | String | `https://soar.mi-labs.es` | Base URL of your Applivery SOAR instance. |
+| `BaseURL` | String | `https://soar.mi-labs.es` | Base URL used for reporting (report, report-apps, custom-checks, event-watches, event-notify, agent-status) AND certificate renewal. Once a workspace uses mTLS, this must point at the dedicated agent subdomain (Settings → mTLS Agent Authentication → Reverse Proxy Configuration) — renewal always requires a valid client certificate, so it must go through that vhost. |
+| `RegisterURL` | String | *(none — optional, falls back to `BaseURL`)* | Base URL used ONLY for the one-time `/api/device-mtls/register` call. `/register` never presents a client cert (the bootstrap token is the credential), so it doesn't need the mTLS vhost's health at all — setting this to the ordinary dashboard domain decouples first-time enrollment from whether that vhost happens to be up. Leave unset for the historical single-URL behavior. |
 | `WorkspaceSlug` | String | *(none — required)* | Your workspace identifier. |
 | `ReportSecret` | String | *(none — optional)* | Device-report webhook secret (Settings → Device Data Webhook → Generate webhook secret). Either this or `BootstrapToken` must be set — an mTLS-only deployment (only `BootstrapToken` set) is fully supported. |
 | `BootstrapToken` | String | *(none — optional)* | The workspace's Global Bootstrap Token (Settings → mTLS Agent Authentication → Generate). The SAME value is pushed to every device in the fleet — see [mTLS Agent Authentication](#mtls-agent-authentication) below. Safe to leave unset if your workspace hasn't enabled mTLS yet. |
@@ -198,7 +199,8 @@ register.
 
 1. **First run with `BootstrapToken` set:** the agent generates an ECDSA
    P-256 keypair locally (the private key never leaves the device), builds a
-   CSR, and registers with the backend over plain HTTPS using the token.
+   CSR, and registers with the backend over plain HTTPS using the token —
+   against `RegisterURL` if set, otherwise `BaseURL`.
    The backend validates the token, checks the device's serial number
    against Applivery's live fleet, and — if both check out — issues a
    certificate immediately (no admin approval step; a bootstrap token is
