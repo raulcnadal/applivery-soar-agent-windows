@@ -258,9 +258,11 @@ scripts are shelled out to for the built-in telemetry (Custom Device Checks'
 5. **Firewall status** — `SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile`.
 6. **Installed software** (when `ReportApps=1`) — `winget list` when
    available (preferred: its `Id` matches App Lists' Winget search source
-   exactly), otherwise 64-bit, 32-bit (`WOW6432Node`), and per-user
-   `Uninstall` registry keys, deduplicated into clean name/version pairs and
-   tagged `origin: "msi"`. Either way, AppX/Store packages (Calculator,
+   exactly), tagged `origin: "winget"`; otherwise 64-bit, 32-bit
+   (`WOW6432Node`), and per-user `Uninstall` registry keys, deduplicated into
+   clean name/version pairs and tagged `origin: "msi"` (only reached when
+   winget itself isn't invokable, e.g. running as LocalSystem with no App
+   Installer package present). Either way, AppX/Store packages (Calculator,
    Store-installed apps, and other UWP apps — invisible to both winget and
    the registry) are enumerated separately via PowerShell
    `Get-AppxPackage -AllUsers` and appended, tagged `origin: "store"`.
@@ -340,13 +342,13 @@ rather than wiping it.
   "platform": "windows",
   "serialNumber": "PF3ABCDE",
   "apps": [
-    { "identifier": "Google Chrome", "name": "Google Chrome", "version": "125.0.6422.113", "origin": "msi" },
+    { "identifier": "Mozilla.Firefox", "name": "Mozilla Firefox", "version": "128.0", "origin": "winget" },
     { "identifier": "microsoft.windowscalculator", "name": "Microsoft.WindowsCalculator", "version": "11.2503.0.0", "origin": "store" }
   ]
 }
 ```
 
-`origin` is optional — `"msi"` for classic Win32 installer apps (winget/registry-sourced), `"store"` for AppX/UWP packages (PowerShell `Get-AppxPackage`-sourced). Omitted entirely on older agent builds that predate this field; the backend treats a missing `origin` the same as it always has.
+`origin` is optional — `"winget"` for apps detected via `winget list`, `"msi"` for the registry Uninstall-key fallback (only used when winget itself isn't invokable), `"store"` for AppX/UWP packages (PowerShell `Get-AppxPackage`-sourced). Omitted entirely on older agent builds that predate this field; the backend treats a missing `origin` the same as it always has.
 
 ---
 

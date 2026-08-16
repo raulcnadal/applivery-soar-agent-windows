@@ -21,13 +21,20 @@ type InstalledApp struct {
 	Identifier string `json:"identifier"`
 	Name       string `json:"name"`
 	Version    string `json:"version"`
-	// Windows-only, optional — "msi" for classic Win32 installer apps
-	// (winget/registry-sourced), "store" for AppX/UWP packages (PowerShell
-	// Get-AppxPackage-sourced). Omitted (empty) rather than defaulted so an
-	// older backend that doesn't know this field yet just sees it absent,
-	// same as any other optional JSON field. Mirrors the backend's own
-	// origin convention for server-fetched apps — see SOAR's
-	// installedApps.service.ts InstalledAppsEntry.apps[].origin doc comment.
+	// Windows-only, optional — "winget" for apps detected via `winget list`
+	// (a real package-manager source, not just "some installer ran"), "msi"
+	// for the registry Uninstall-key fallback (used only when winget itself
+	// isn't invokable — see GetInstalledApps' doc comment), "store" for
+	// AppX/UWP packages (PowerShell Get-AppxPackage-sourced). Split into
+	// "winget" vs "msi" specifically so SOAR's Apps view can show a genuine
+	// "Winget" Source value instead of collapsing every self-reported Win32
+	// app into one undifferentiated bucket — a real user-requested
+	// distinction (Winget / MS Store / UEM / Manual). Omitted (empty)
+	// rather than defaulted so an older backend that doesn't know this
+	// field yet just sees it absent, same as any other optional JSON
+	// field. Mirrors the backend's own origin convention for server-fetched
+	// apps — see SOAR's installedApps.service.ts InstalledAppsEntry.apps[].origin
+	// doc comment.
 	Origin string `json:"origin,omitempty"`
 }
 
@@ -156,11 +163,15 @@ func getAppsViaWinget() []InstalledApp {
 			continue
 		}
 		seen[id] = true
-		apps = append(apps, InstalledApp{Identifier: id, Name: values["Name"], Version: values["Version"], Origin: "msi"})
+		apps = append(apps, InstalledApp{Identifier: id, Name: values["Name"], Version: values["Version"], Origin: "winget"})
 	}
 	return apps
 }
 
+// getAppsViaRegistry only runs when winget itself isn't usable (see
+// GetInstalledApps), so everything it finds is tagged Origin:"msi" — a
+// best-effort "this is some classic Win32 install, but we didn't get it via
+// a real package manager" signal, distinct from "winget" above.
 func getAppsViaRegistry() []InstalledApp {
 	var apps []InstalledApp
 	seen := make(map[string]bool)
