@@ -267,16 +267,26 @@ scripts are shelled out to for the built-in telemetry (Custom Device Checks'
    the registry) are enumerated separately via PowerShell
    `Get-AppxPackage -AllUsers` and appended, tagged `origin: "store"`. For
    each AppX package, the reported name is resolved to its real,
-   human-friendly display name (e.g. "Angry Birds 2") via
-   `Get-AppxPackageManifest` + a P/Invoke to `SHLoadIndirectString` for
-   `ms-resource:`-indirect display names — `Get-AppxPackage`'s own `Name`
-   property is just the package identity string (e.g.
-   "1ED5AEA5.4160926B82DB"), never meant for display. Falls back to that
-   identity string on any resolution failure, so a device is never left
-   with a missing app just because one package's manifest couldn't be
-   read. The reported `identifier` is unaffected either way — it's always
-   the lowercased package identity name, matching Applivery UEM's own
-   AppInventoryResults-sourced identifier for the same package.
+   human-friendly display name (e.g. "Angry Birds 2") by reading
+   `AppxManifest.xml` directly off disk from the package's own
+   `InstallLocation`, plus a P/Invoke to `SHLoadIndirectString` for the
+   (fairly common) case where the manifest's `DisplayName` is an
+   `ms-resource:`-indirect reference rather than a literal string —
+   `Get-AppxPackage`'s own `Name` property is just the package identity
+   string (e.g. "1ED5AEA5.4160926B82DB"), never meant for display. (An
+   earlier version of this used the `Get-AppxPackageManifest` cmdlet
+   instead, which silently never worked under this agent's LocalSystem
+   service context — every resolution failed invisibly, so no package ever
+   got a resolved name. Reading the manifest file straight off disk sidesteps
+   that entirely.) Falls back to the identity string on any resolution
+   failure, so a device is never left with a missing app just because one
+   package's manifest couldn't be read. The reported `identifier` is
+   unaffected either way — it's always the lowercased package identity name,
+   matching Applivery UEM's own AppInventoryResults-sourced identifier for
+   the same package. `installLocation` (the on-disk install path) is also
+   reported when known — always for AppX packages, and for classic Win32
+   installs only when the installer wrote one to the registry's `Uninstall`
+   key — purely informational, shown in SOAR's App detail modal.
 
 A serial number that's empty or a known placeholder (`UNKNOWN`,
 `To Be Filled By O.E.M.`, `Default string`, etc.) is treated as unusable —
@@ -354,12 +364,20 @@ rather than wiping it.
   "serialNumber": "PF3ABCDE",
   "apps": [
     { "identifier": "Mozilla.Firefox", "name": "Mozilla Firefox", "version": "128.0", "origin": "winget" },
-    { "identifier": "microsoft.windowscalculator", "name": "Microsoft.WindowsCalculator", "version": "11.2503.0.0", "origin": "store" }
+    {
+      "identifier": "1ed5aea5.4160926b82db",
+      "name": "Angry Birds 2",
+      "version": "3.17.10.0",
+      "origin": "store",
+      "installLocation": "C:\\Program Files\\WindowsApps\\1ED5AEA5.4160926B82DB_3.17.10.0_x64__p2gbknwb5d8r2"
+    }
   ]
 }
 ```
 
 `origin` is optional — `"winget"` for apps detected via `winget list`, `"msi"` for the registry Uninstall-key fallback (only used when winget itself isn't invokable), `"store"` for AppX/UWP packages (PowerShell `Get-AppxPackage`-sourced). Omitted entirely on older agent builds that predate this field; the backend treats a missing `origin` the same as it always has.
+
+`installLocation` is optional and purely informational (shown in SOAR's App detail modal, never used for identifier/matching logic) — always present for AppX/Store packages, present for classic Win32 installs only when the installer wrote one to the registry's `Uninstall` key, and never present for winget-sourced entries.
 
 ---
 

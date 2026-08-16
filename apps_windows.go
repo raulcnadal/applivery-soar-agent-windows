@@ -36,6 +36,17 @@ type InstalledApp struct {
 	// apps — see SOAR's installedApps.service.ts InstalledAppsEntry.apps[].origin
 	// doc comment.
 	Origin string `json:"origin,omitempty"`
+	// InstallLocation is the on-disk install path, when known — for AppX/
+	// Store packages this is always available (Get-AppxPackage's own
+	// InstallLocation property, e.g. "C:\Program Files\WindowsApps\
+	// 1ED5AEA5.4160926B82DB_3.17.10.0_x64__p2gbknwb5d8r2"); for classic
+	// Win32 installs found via the registry it's the Uninstall key's own
+	// "InstallLocation" value when the installer bothered to write one
+	// (many don't). Never populated for winget-sourced entries — `winget
+	// list` doesn't surface it without a second per-package query this
+	// agent doesn't make. Purely informational (surfaced in SOAR's App
+	// detail modal); never used for identifier/matching logic.
+	InstallLocation string `json:"installLocation,omitempty"`
 }
 
 type AppsPayload struct {
@@ -206,6 +217,7 @@ func getAppsViaRegistry() []InstalledApp {
 			displayName, _, errName := subKey.GetStringValue("DisplayName")
 			displayVersion, _, _ := subKey.GetStringValue("DisplayVersion")
 			systemComponent, _, _ := subKey.GetIntegerValue("SystemComponent")
+			installLocation, _, _ := subKey.GetStringValue("InstallLocation")
 			subKey.Close()
 
 			if errName != nil || strings.TrimSpace(displayName) == "" || systemComponent == 1 {
@@ -221,10 +233,11 @@ func getAppsViaRegistry() []InstalledApp {
 			seen[identifier] = true
 
 			apps = append(apps, InstalledApp{
-				Identifier: identifier,
-				Name:       displayName,
-				Version:    displayVersion,
-				Origin:     "msi",
+				Identifier:      identifier,
+				Name:            displayName,
+				Version:         displayVersion,
+				Origin:          "msi",
+				InstallLocation: strings.TrimSpace(installLocation),
 			})
 		}
 	}
@@ -262,24 +275,40 @@ func getAppsViaRegistry() []InstalledApp {
 // exposed by Get-AppxPackage at all — its own `Name` property is the
 // package IDENTITY (e.g. "1ED5AEA5.4160926B82DB" for a Store-installed
 // game), not something meant for display. The actual name lives in
-// AppxManifest.xml's <Properties><DisplayName>, which is frequently an
-// indirect resource reference ("ms-resource:AppName" or similar) rather
-// than a literal string, requiring the package's own resources.pri to
-// resolve. For each package the script below calls Get-AppxPackageManifest
-// (already proven to work under this agent's LocalSystem service context,
-// same as Get-AppxPackage itself — unlike Get-StartApps, this doesn't touch
-// the interactive Shell/Start Menu at all) to read the raw DisplayName, and
-// — only when it's an ms-resource indirect reference — resolves it via a
+// AppxManifest.xml's <Properties><DisplayName>, which is *sometimes* an
+// indirect resource reference ("ms-resource:AppName" or similar) requiring
+// the package's own resources.pri to resolve, but is very often already a
+// literal string (confirmed live: Angry Birds 2's own manifest DisplayName
+// is the literal text "Angry Birds 2", no indirection at all).
+//
+// An earlier version of this function read the manifest via the
+// `Get-AppxPackageManifest` cmdlet. That never actually worked under this
+// agent's LocalSystem Windows Service context — the cmdlet silently failed
+// on every package (caught by its own try/catch, so the failure was
+// invisible), meaning DisplayName resolution never ran at all, for *any*
+// package, resource-indirected or not. Confirmed by direct comparison: a
+// plain `Get-Content "$($pkg.InstallLocation)\AppxManifest.xml"` read of the
+// exact same package, on the same machine, returns the manifest fine.
+// `Get-AppxPackageManifest` goes through the AppX deployment/WinRT stack,
+// which — unlike Get-AppxPackage's own enumeration — appears to expect an
+// interactive user session; reading the manifest file directly off disk via
+// InstallLocation (plain filesystem access, no WinRT/deployment API
+// involved) sidesteps that entirely, so that's what this function does now.
+//
+// For each package: read InstallLocation\AppxManifest.xml straight off
+// disk, parse Properties/DisplayName. If it's a literal string, use it
+// as-is. If it's an "ms-resource:" indirect reference, resolve it via a
 // P/Invoke to shlwapi.dll's SHLoadIndirectString (a plain Win32 resource-
-// loading API, not a WinRT/shell-integration one, so it doesn't need an
-// interactive session either) using the documented
+// loading API, not a WinRT/shell-integration one, so — unlike Get-StartApps
+// — it doesn't need an interactive session either) using the documented
 // "@{PackageFullName?<raw ms-resource value>}" indirect-string form. Every
-// step of this is wrapped in try/catch and silently falls back to the
-// previous behavior (raw identity name as the display name) on any
-// failure — a resolution miss should never cost a device its app-inventory
-// data. `Identifier` is unaffected by any of this: it stays the lowercased
-// package identity name exactly as before, so it keeps agreeing with
-// Applivery UEM's own AppInventoryResults-sourced identifier
+// step is wrapped in try/catch and silently falls back to the previous
+// behavior (raw identity name as the display name) on any failure — a
+// resolution miss should never cost a device its app-inventory data.
+// InstallLocation itself is also reported (purely informational, shown in
+// SOAR's App detail modal). `Identifier` is unaffected by any of this: it
+// stays the lowercased package identity name exactly as before, so it keeps
+// agreeing with Applivery UEM's own AppInventoryResults-sourced identifier
 // (windowsDeviceApps.service.ts) — only the display Name changes.
 func getAppsViaAppx() []InstalledApp {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -299,22 +328,29 @@ public class ApplveryAppxRes {
 $pkgs = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Where-Object { -not $_.IsFramework -and -not $_.IsResourcePackage })
 $apps = @($pkgs | ForEach-Object {
     $displayName = $null
+    $installLocation = $_.InstallLocation
     try {
-        $raw = ($_ | Get-AppxPackageManifest -ErrorAction Stop).Package.Properties.DisplayName
-        if ($raw) {
-            if ($raw.ToString().StartsWith('ms-resource:')) {
-                try {
-                    $buf = New-Object System.Text.StringBuilder 1024
-                    $indirect = "@{$($_.PackageFullName)?$raw}"
-                    $hr = [ApplveryAppxRes]::SHLoadIndirectString($indirect, $buf, $buf.Capacity, [IntPtr]::Zero)
-                    if ($hr -eq 0 -and $buf.Length -gt 0) { $displayName = $buf.ToString() }
-                } catch {}
-            } else {
-                $displayName = $raw.ToString()
+        if ($installLocation) {
+            $manifestPath = Join-Path $installLocation "AppxManifest.xml"
+            if (Test-Path -LiteralPath $manifestPath) {
+                [xml]$manifest = Get-Content -LiteralPath $manifestPath -ErrorAction Stop
+                $raw = $manifest.Package.Properties.DisplayName
+                if ($raw) {
+                    if ($raw.ToString().StartsWith('ms-resource:')) {
+                        try {
+                            $buf = New-Object System.Text.StringBuilder 1024
+                            $indirect = "@{$($_.PackageFullName)?$raw}"
+                            $hr = [ApplveryAppxRes]::SHLoadIndirectString($indirect, $buf, $buf.Capacity, [IntPtr]::Zero)
+                            if ($hr -eq 0 -and $buf.Length -gt 0) { $displayName = $buf.ToString() }
+                        } catch {}
+                    } else {
+                        $displayName = $raw.ToString()
+                    }
+                }
             }
         }
     } catch {}
-    [PSCustomObject]@{ Name = $_.Name; Version = $_.Version; DisplayName = $displayName }
+    [PSCustomObject]@{ Name = $_.Name; Version = $_.Version; DisplayName = $displayName; InstallLocation = $installLocation }
 })
 ConvertTo-Json -InputObject $apps -Compress
 `
@@ -331,9 +367,10 @@ ConvertTo-Json -InputObject $apps -Compress
 	}
 
 	var raw []struct {
-		Name        string `json:"Name"`
-		Version     string `json:"Version"`
-		DisplayName string `json:"DisplayName"`
+		Name            string `json:"Name"`
+		Version         string `json:"Version"`
+		DisplayName     string `json:"DisplayName"`
+		InstallLocation string `json:"InstallLocation"`
 	}
 	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &raw); err != nil {
 		log.Printf("Could not parse Get-AppxPackage output (Store/system apps will be missing from this report): %v", err)
@@ -363,7 +400,13 @@ ConvertTo-Json -InputObject $apps -Compress
 		if displayName == "" || strings.HasPrefix(strings.ToLower(displayName), "ms-resource") {
 			displayName = name
 		}
-		apps = append(apps, InstalledApp{Identifier: identifier, Name: displayName, Version: strings.TrimSpace(a.Version), Origin: "store"})
+		apps = append(apps, InstalledApp{
+			Identifier:      identifier,
+			Name:            displayName,
+			Version:         strings.TrimSpace(a.Version),
+			Origin:          "store",
+			InstallLocation: strings.TrimSpace(a.InstallLocation),
+		})
 	}
 	return apps
 }
