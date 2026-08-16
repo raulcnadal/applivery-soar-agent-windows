@@ -67,7 +67,7 @@ func fetchCustomChecks(baseURL *url.URL, config Config) []CustomCheckDef {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Custom checks poll returned HTTP %d — skipping this cycle's custom checks", resp.StatusCode)
+		log.Printf("Custom checks poll returned HTTP %d — skipping this cycle's custom checks: %s", resp.StatusCode, responseBodySnippet(resp))
 		return nil
 	}
 

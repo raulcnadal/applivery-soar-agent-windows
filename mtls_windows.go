@@ -244,7 +244,7 @@ func registerMtlsIdentity(baseURL *url.URL, config Config) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("mTLS: registration rejected by backend (HTTP %d) — will retry next cycle.", resp.StatusCode)
+		log.Printf("mTLS: registration rejected by backend (HTTP %d) — will retry next cycle: %s", resp.StatusCode, responseBodySnippet(resp))
 		return
 	}
 
@@ -302,7 +302,7 @@ func renewMtlsIdentity(baseURL *url.URL, config Config) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("mTLS: renewal rejected by backend (HTTP %d) — will retry next cycle.", resp.StatusCode)
+		log.Printf("mTLS: renewal rejected by backend (HTTP %d) — will retry next cycle: %s", resp.StatusCode, responseBodySnippet(resp))
 		return
 	}
 

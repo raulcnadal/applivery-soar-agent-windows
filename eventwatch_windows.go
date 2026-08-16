@@ -84,7 +84,7 @@ func fetchEventWatches(baseURL *url.URL, config Config) ([]EventWatchDef, int) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Event watches poll returned HTTP %d — skipping this cycle's sync", resp.StatusCode)
+		log.Printf("Event watches poll returned HTTP %d — skipping this cycle's sync: %s", resp.StatusCode, responseBodySnippet(resp))
 		return nil, 0
 	}
 

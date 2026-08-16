@@ -63,7 +63,7 @@ func fetchAgentStatus(baseURL *url.URL, config Config, serialNumber, platform st
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("agent-status endpoint returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("agent-status endpoint returned HTTP %d: %s", resp.StatusCode, responseBodySnippet(resp))
 	}
 
 	var result agentstatus.AgentStatusResponse
@@ -129,7 +129,7 @@ func forceEvaluateCompliance() {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("Force evaluate: backend returned HTTP %d", resp.StatusCode)
+		log.Printf("Force evaluate: backend returned HTTP %d: %s", resp.StatusCode, responseBodySnippet(resp))
 		return
 	}
 	log.Println("Force evaluate: backend accepted the request — refreshing this device's compliance status.")

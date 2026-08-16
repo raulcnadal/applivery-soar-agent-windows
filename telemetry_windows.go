@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -15,6 +16,26 @@ import (
 
 	"github.com/raulcnadal/applivery-soar-agent-windows/internal/agentstatus"
 )
+
+// responseBodySnippet reads and trims a response body for logging alongside
+// a non-2xx status code — every call site in this file/status_windows.go/
+// eventwatch_windows.go/customchecks_windows.go/mtls_windows.go used to log
+// only the bare HTTP status, discarding the backend's own `{"detail": "..."}`
+// JSON error message entirely. That message is often the ONLY place the
+// actual rejection reason exists — errorHandler.middleware.ts on the backend
+// deliberately never logs an HttpError server-side (see its own comment), so
+// e.g. a 401 from assertMtlsIdentity used to be invisible on BOTH ends: not
+// in the backend's logs, and not in this agent's either, once the response
+// body itself was thrown away here. Capped at 500 bytes — plenty for a JSON
+// error detail, small enough to never bloat agent.log even if a
+// misconfigured proxy returns an HTML error page instead of JSON.
+func responseBodySnippet(resp *http.Response) string {
+	if resp == nil || resp.Body == nil {
+		return ""
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
+	return strings.TrimSpace(string(body))
+}
 
 // triggerPollInterval is how often runAgentLoop checks for a force-report/
 // force-evaluate marker file left by the tray helper (agentstatus.
@@ -325,7 +346,7 @@ func sendWebhook(targetURL string, config Config, payload interface{}) bool {
 				log.Printf("Report to %s sent successfully -> HTTP Status %d", targetURL, resp.StatusCode)
 				return true
 			}
-			log.Printf("Attempt %d: %s returned non-success status %d", i, targetURL, resp.StatusCode)
+			log.Printf("Attempt %d: %s returned non-success status %d: %s", i, targetURL, resp.StatusCode, responseBodySnippet(resp))
 		} else {
 			log.Printf("Attempt %d: Network error POSTing to %s: %v", i, targetURL, err)
 		}
