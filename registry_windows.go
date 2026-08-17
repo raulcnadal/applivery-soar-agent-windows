@@ -67,7 +67,19 @@ func (c Config) IsConfigured() bool {
 	return c.WorkspaceSlug != "" && (c.ReportSecret != "" || c.BootstrapToken != "")
 }
 
-func LoadConfig() Config {
+// loadConfigQuiet reads the Managed Configuration registry key WITHOUT
+// emitting LoadConfig's "Config loaded: ..." summary line (found=false is
+// silent too).
+//
+// Exists for callers on a much tighter cadence than a real report cycle —
+// e.g. runAgentLoop's maybeResetTicker, invoked every triggerPollInterval —
+// where calling LoadConfig() directly makes it print "Config loaded: ..."
+// on every single tick forever, drowning out every other diagnostic line in
+// the agent's log (the same pattern was ported to the macOS agent's
+// telemetry_macos.go and confirmed there via real-device field testing,
+// Aug 2026 — fixing the same latent bug here for parity, since Windows'
+// version of maybeResetTicker/ensureMtlsIdentity has the identical shape).
+func loadConfigQuiet() (Config, bool) {
 	config := Config{
 		BaseURL:         "https://soar.mi-labs.es",
 		WorkspaceSlug:   "",
@@ -80,8 +92,7 @@ func LoadConfig() Config {
 
 	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Policies\Applivery\SOAR`, registry.QUERY_VALUE)
 	if err != nil {
-		log.Println("No Managed Configuration found in Registry — WorkspaceSlug plus either ReportSecret or BootstrapToken must be set at HKLM\\SOFTWARE\\Policies\\Applivery\\SOAR before this agent can report anything.")
-		return config
+		return config, false
 	}
 	defer k.Close()
 
@@ -112,6 +123,16 @@ func LoadConfig() Config {
 	}
 	if val, _, err := k.GetIntegerValue("IntervalSec"); err == nil && val > 0 {
 		config.IntervalSec = int(val)
+	}
+
+	return config, true
+}
+
+func LoadConfig() Config {
+	config, found := loadConfigQuiet()
+	if !found {
+		log.Println("No Managed Configuration found in Registry — WorkspaceSlug plus either ReportSecret or BootstrapToken must be set at HKLM\\SOFTWARE\\Policies\\Applivery\\SOAR before this agent can report anything.")
+		return config
 	}
 
 	log.Printf(

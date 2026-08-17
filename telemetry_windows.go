@@ -111,7 +111,8 @@ func clampInterval(sec int) time.Duration {
 // not just on the ticker's own tick, so a force-report or trigger check
 // also gets a chance to notice a change promptly.
 func maybeResetTicker(ticker *time.Ticker, current time.Duration) time.Duration {
-	sec := LoadConfig().IntervalSec
+	quietCfg, _ := loadConfigQuiet()
+	sec := quietCfg.IntervalSec
 	if remote := atomic.LoadInt32(&remoteIntervalSecAtomic); remote > 0 {
 		sec = int(remote)
 	}
@@ -190,8 +191,10 @@ func gatherAndReport() {
 	// separate ticker (mtls_windows.go's ensureMtlsIdentity doc comment has
 	// the full rationale). Always best-effort: never blocks or fails this
 	// report cycle, whatever auth this device currently has (legacy secret,
-	// or a valid certificate) is what sendWebhook below will use.
-	ensureMtlsIdentity()
+	// or a valid certificate) is what sendWebhook below will use. Takes the
+	// config already loaded above rather than loading (and logging) its own
+	// copy — this used to double-log "Config loaded: ..." every cycle.
+	ensureMtlsIdentity(config)
 
 	log.Println("Gathering telemetry...")
 

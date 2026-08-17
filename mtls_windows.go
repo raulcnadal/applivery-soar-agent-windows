@@ -135,8 +135,12 @@ func applyLegacyAuthIfNeeded(req *http.Request, config Config) {
 // already has (legacy secret, or its current not-yet-expired certificate)
 // on any failure — same tolerance as every other background operation in
 // this agent (custom checks, event watches, compliance status fetch).
-func ensureMtlsIdentity() {
-	config := LoadConfig()
+//
+// Takes config rather than loading its own copy: it used to call
+// LoadConfig() internally, which meant every gatherAndReport cycle logged
+// "Config loaded: ..." twice (once here, once in gatherAndReport itself).
+// The caller already has a fresh copy from this same cycle.
+func ensureMtlsIdentity(config Config) {
 	if !config.IsConfigured() {
 		return
 	}
