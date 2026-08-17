@@ -404,7 +404,13 @@ func addActionButtons() {
 		drawItem{kind: drawKindPill, rect: cardForceReportRect, text: "Force report", font: fontBody, color: colBrand700, bgColor: colBrand700, align: textAlign, radius: s(8), outline: true},
 		drawItem{kind: drawKindPill, rect: cardForceEvaluateRect, text: "Force evaluate compliance", font: fontBody, color: colWhite, bgColor: colBrand, align: textAlign, radius: s(8)},
 	)
-	cardCursorY = top + h + s(16)
+	// Trailing gap below the buttons: previously 16px, tuned smaller when
+	// this row still sat directly above the Status/compliance hero-pills
+	// row (now moved up onto the device-name line, see addHeaderPills).
+	// With that pills row gone from here, 16px alone left the REPORTING
+	// divider crowding the buttons; 28px restores roughly the same visual
+	// breathing room the old (pills-row-in-between) layout had.
+	cardCursorY = top + h + s(28)
 }
 
 func addDivider() {
@@ -467,7 +473,13 @@ func addPillRow(label, pillText string, pillBg, pillFg uintptr, pillW int32) {
 // never drift out of sync with each other.
 const (
 	cardPolicyPillW = 78
-	cardPolicyGap   = 10
+	// cardPolicyGap is deliberately generous (not just enough to avoid
+	// touching) — this same constant also feeds buildCardContent's width
+	// measurement pass, so widening it grows the card exactly enough to
+	// keep this same visual gap on the widest policy name currently shown,
+	// rather than the fixed gap getting visually "used up" by whatever
+	// name happened to size the card.
+	cardPolicyGap = 20
 )
 
 // addPolicyRow lays out the policy name and its OK/Violation pill on a single
@@ -698,7 +710,7 @@ func buildCardContent() {
 		color: cardPrimaryTextColor(light),
 		align: dtLeft | dtVCenter | dtSingleLine | dtEndEllipsis,
 	})
-	cardCursorY += deviceNameH + s(14)
+	cardCursorY += deviceNameH + s(24)
 
 	addActionButtons()
 
