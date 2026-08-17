@@ -270,11 +270,38 @@ var (
 	fontsReady  bool
 )
 
+// fontFamilyUI is the fallback family — used only when the embedded Outfit
+// weights (fonts.go) failed to register, so the card at least renders in a
+// guaranteed-present system font rather than whatever GDI's mapper
+// silently substitutes for a missing family. Segoe UI is present on every
+// supported Windows version.
 const fontFamilyUI = "Segoe UI"
 
 // s DPI-scales a base pixel value against cardScale (see showCard).
 func s(v int32) int32 {
 	return int32(float64(v) * cardScale)
+}
+
+// fontFamilyForWeight picks the embedded Outfit family matching `weight`
+// once loadEmbeddedFonts (fonts.go) has run, falling back to the system
+// fontFamilyUI wholesale (all three weights together, never a mix — see
+// fonts.go's outfitLoaded doc comment) if registration failed. This repo
+// only embeds Regular/SemiBold/Bold (matching the design's actual 3-weight
+// ask); fwLight — used for pill text, see below — has no dedicated Outfit
+// instance shipped, so it maps to the Regular (400) weight rather than an
+// entirely different typeface.
+func fontFamilyForWeight(weight int32) string {
+	if !outfitLoaded {
+		return fontFamilyUI
+	}
+	switch weight {
+	case fwBold:
+		return outfitBold
+	case fwSemiBold:
+		return outfitSemiBold
+	default:
+		return outfitRegular
+	}
 }
 
 // Font weights below match the BlueSky design system's actual scale
@@ -289,16 +316,17 @@ func ensureCardFonts() {
 	if fontsReady {
 		return
 	}
-	fontTitle = createFont(fontFamilyUI, s(19), fwSemiBold)
-	fontSection = createFont(fontFamilyUI, s(12), fwSemiBold)
-	fontBody = createFont(fontFamilyUI, s(14), fwRegular)
-	fontBodyMed = createFont(fontFamilyUI, s(14), fwSemiBold)
-	fontSmall = createFont(fontFamilyUI, s(12), fwRegular)
+	loadEmbeddedFonts()
+	fontTitle = createFont(fontFamilyForWeight(fwSemiBold), s(19), fwSemiBold)
+	fontSection = createFont(fontFamilyForWeight(fwSemiBold), s(12), fwSemiBold)
+	fontBody = createFont(fontFamilyForWeight(fwRegular), s(14), fwRegular)
+	fontBodyMed = createFont(fontFamilyForWeight(fwSemiBold), s(14), fwSemiBold)
+	fontSmall = createFont(fontFamilyForWeight(fwRegular), s(12), fwRegular)
 	// StatusPill.tsx renders pill labels `font-light` (300) — not semibold —
 	// with `text-xs` (12px); Button.tsx renders its own label `font-normal`
 	// (400) at 14px for the md size this card uses, which addActionButtons
 	// gets by reusing fontBody directly rather than this font.
-	fontPill = createFont(fontFamilyUI, s(12), fwLight)
+	fontPill = createFont(fontFamilyForWeight(fwLight), s(12), fwLight)
 	fontsReady = true
 }
 
@@ -497,28 +525,46 @@ func addRiskBar(score int, barColor uintptr) {
 	cardCursorY += trackH + s(12)
 }
 
-// addHeroPills draws the centered pair of pills below the title/subtitle —
-// left is an outline pill (border only, no fill, mirroring the web app's
-// "Company" badge), right is a solid-filled status pill.
-func addHeroPills(leftText string, leftW int32, rightText string, rightW int32, rightBg, rightFg uintptr) {
-	h := s(26)
-	gap := s(8)
-	lw, rw := s(leftW), s(rightW)
-	total := lw + gap + rw
-	startX := (cardWidthPx - total) / 2
-	leftRect := winRect{left: startX, top: cardCursorY, right: startX + lw, bottom: cardCursorY + h}
-	rightRect := winRect{left: startX + lw + gap, top: cardCursorY, right: startX + lw + gap + rw, bottom: cardCursorY + h}
+// cardHeaderPillLabelW/cardHeaderPillValueW are the fixed pill widths for
+// the Status/compliance pill pair now living on the device-name row (see
+// addHeaderPills, buildCardContent) — sized against this card's own longest
+// known text for each ("Status", and "Unavailable" — one char longer than
+// "Violation", which already fits comfortably in cardPolicyPillW's 78px at
+// the same fontPill/12px, so 104 leaves visibly more breathing room).
+const (
+	cardHeaderPillLabelW = 60
+	cardHeaderPillValueW = 104
+	cardHeaderPillGap    = 6
+)
+
+// addHeaderPills lays out the Status/compliance pill pair at the top-right
+// of the device-name row instead of their previous spot centered on their
+// own row below the action buttons — matches the target card layout,
+// putting these two pills level with the device name the same way a web
+// app device-list row puts its own status pill at the end of the name
+// line. rowTop/rowH describe the device-name row's own rect; the pills are
+// vertically centered within it using the same (h-ph)/2 centering
+// addPillRow already uses for its own row. Returns the x-coordinate the
+// device-name text rect should end at (a small gap before the left pill),
+// so the caller can size that rect to avoid overlapping these.
+func addHeaderPills(rowTop, rowH int32, leftText, rightText string, rightBg, rightFg uintptr) int32 {
+	ph := s(22)
+	pillTop := rowTop + (rowH-ph)/2
+	gap := s(cardHeaderPillGap)
+	lw, rw := s(cardHeaderPillLabelW), s(cardHeaderPillValueW)
+	rightRect := winRect{left: cardWidthPx - s(cardPadX) - rw, top: pillTop, right: cardWidthPx - s(cardPadX), bottom: pillTop + ph}
+	leftRect := winRect{left: rightRect.left - gap - lw, top: pillTop, right: rightRect.left - gap, bottom: pillTop + ph}
 	// Left pill mirrors StatusPill's neutral "gray" variant — outline-only
 	// (no fill) rather than the gray-100 fill StatusPill itself uses, so it
 	// still reads correctly against both the dark and light card surface —
-	// but the border is now the same blended-tint treatment as every other
-	// pill on this card instead of a flat, unrelated gray.
+	// the border uses the same blended-tint treatment as every other pill
+	// on this card instead of a flat, unrelated gray.
 	leftBorder := blendColor(colGray400, cardSurfaceColor(cardIsLight), 0.4)
 	cardItems = append(cardItems,
-		drawItem{kind: drawKindPill, rect: leftRect, text: leftText, font: fontPill, color: cardMutedTextColor(), bgColor: leftBorder, align: dtCenter | dtVCenter | dtSingleLine, radius: s(13), outline: true},
-		drawItem{kind: drawKindPill, rect: rightRect, text: rightText, font: fontPill, color: rightFg, bgColor: rightBg, align: dtCenter | dtVCenter | dtSingleLine, radius: s(13), borderColor: blendColor(rightFg, rightBg, 0.25)},
+		drawItem{kind: drawKindPill, rect: leftRect, text: leftText, font: fontPill, color: cardMutedTextColor(), bgColor: leftBorder, align: dtCenter | dtVCenter | dtSingleLine, radius: ph / 2, outline: true},
+		drawItem{kind: drawKindPill, rect: rightRect, text: rightText, font: fontPill, color: rightFg, bgColor: rightBg, align: dtCenter | dtVCenter | dtSingleLine | dtEndEllipsis, radius: ph / 2, borderColor: blendColor(rightFg, rightBg, 0.25)},
 	)
-	cardCursorY += h
+	return leftRect.left - s(10)
 }
 
 // buildCardContent re-reads status.json fresh (see readStatusCache in
@@ -545,18 +591,43 @@ func buildCardContent() {
 	cardWidthPx = s(cardMinWidth)
 	deviceNameText := "This device"
 	var slugText string
-	if err == nil && cache != nil {
+	hasData := err == nil && cache != nil
+	// pillStatusText/Bg/Fg back the Status pill now living on the
+	// device-name row (see addHeaderPills below) — computed up front,
+	// before that row is drawn, rather than down in the old spot after the
+	// "waiting for first report" bail-out, since the pills need to exist
+	// (or not) at the same time the device-name row itself is laid out.
+	var pillStatusText string
+	var pillStatusBg, pillStatusFg uintptr
+	if hasData {
 		if cache.DeviceName != "" {
 			deviceNameText = cache.DeviceName
 		}
 		slugText = cache.WorkspaceSlug
+
+		comp := cache.Compliance
+		pillStatusBg, pillStatusFg, pillStatusText = colSuccess, colWhite, "Compliant"
+		if !comp.Available {
+			pillStatusBg, pillStatusText = colGray400, "Unavailable"
+		} else if !comp.Compliant {
+			n := len(comp.Violations)
+			plural := "s"
+			if n == 1 {
+				plural = ""
+			}
+			pillStatusText = fmt.Sprintf("%d issue%s", n, plural)
+			pillStatusBg = colDanger
+		}
+
 		if screenDC, _, _ := procGetDC.Call(0); screenDC != 0 {
 			needed := cardWidthPx
-			if w := measureTextWidthPx(screenDC, fontTitle, deviceNameText) + s(cardPadX)*2; w > needed {
+			if w := measureTextWidthPx(screenDC, fontTitle, deviceNameText) + s(cardPadX)*2 + s(cardHeaderPillLabelW) + s(cardHeaderPillValueW) + s(cardHeaderPillGap)*2; w > needed {
 				needed = w
 			}
-			if w := measureTextWidthPx(screenDC, fontSmall, slugText) + s(cardPadX)*2; w > needed {
-				needed = w
+			if slugText != "" {
+				if w := measureTextWidthPx(screenDC, fontSmall, "Managed by "+slugText) + s(cardPadX)*2; w > needed {
+					needed = w
+				}
 			}
 			if cache.Compliance.Available {
 				for _, p := range cache.Compliance.Policies {
@@ -579,12 +650,10 @@ func buildCardContent() {
 
 	// Header: banner logo top-left (replacing the old centered "Applivery
 	// SOAR" text title), close button top-right on the same row, then the
-	// device name (bold, "same font type" as the old title per the brand
-	// reference this layout follows) and workspace slug stacked left-aligned
-	// underneath — mirrors the SOAR web app's own Workspace Profile modal
-	// styling (bold name, muted slug below) without literally centering
-	// everything the way that modal does, since the banner is explicitly
-	// top-left here rather than centered.
+	// device name (semibold, left-aligned) on its own row sharing space with
+	// the Status/compliance pill pair at the right (see addHeaderPills) —
+	// the workspace slug that used to stack directly under the name now
+	// lives in the card's own footer instead ("Managed by {slug}").
 	bannerH := s(22)
 	bannerTop := cardCursorY
 	bannerW := int32(float64(bannerH) * float64(bannerRasterW) / float64(bannerRasterH))
@@ -611,30 +680,25 @@ func buildCardContent() {
 	})
 	cardCursorY = bannerTop + bannerH + s(14)
 
+	// Device name shares its row with the Status/compliance pill pair
+	// (top-right, see addHeaderPills) rather than the pills sitting on
+	// their own centered row further down — the workspace slug that used
+	// to sit directly under the name has moved to the card's footer
+	// ("Managed by {slug}", see below) instead.
 	deviceNameH := s(24)
+	nameRight := cardWidthPx - s(cardPadX)
+	if hasData {
+		nameRight = addHeaderPills(cardCursorY, deviceNameH, "Status", pillStatusText, pillStatusBg, pillStatusFg)
+	}
 	cardItems = append(cardItems, drawItem{
 		kind:  drawKindText,
-		rect:  winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX), bottom: cardCursorY + deviceNameH},
+		rect:  winRect{left: s(cardPadX), top: cardCursorY, right: nameRight, bottom: cardCursorY + deviceNameH},
 		text:  deviceNameText,
 		font:  fontTitle,
 		color: cardPrimaryTextColor(light),
 		align: dtLeft | dtVCenter | dtSingleLine | dtEndEllipsis,
 	})
-	cardCursorY += deviceNameH + s(2)
-
-	if slugText != "" {
-		slugH := s(18)
-		cardItems = append(cardItems, drawItem{
-			kind:  drawKindText,
-			rect:  winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX), bottom: cardCursorY + slugH},
-			text:  slugText,
-			font:  fontSmall,
-			color: cardMutedTextColor(),
-			align: dtLeft | dtVCenter | dtSingleLine | dtEndEllipsis,
-		})
-		cardCursorY += slugH + s(2)
-	}
-	cardCursorY += s(12)
+	cardCursorY += deviceNameH + s(14)
 
 	addActionButtons()
 
@@ -654,20 +718,6 @@ func buildCardContent() {
 	}
 
 	comp := cache.Compliance
-	statusBg, statusFg, statusText := colSuccess, colWhite, "Compliant"
-	if !comp.Available {
-		statusBg, statusText = colGray400, "Unavailable"
-	} else if !comp.Compliant {
-		n := len(comp.Violations)
-		plural := "s"
-		if n == 1 {
-			plural = ""
-		}
-		statusText = fmt.Sprintf("%d issue%s", n, plural)
-		statusBg = colDanger
-	}
-	addHeroPills("Windows Device", 118, statusText, 118, statusBg, statusFg)
-	cardCursorY += s(16)
 	addDivider()
 
 	addSectionHeader("Reporting")
@@ -752,10 +802,18 @@ func buildCardContent() {
 
 	addDivider()
 	footerH := s(16)
-	cardItems = append(cardItems,
-		drawItem{kind: drawKindText, rect: winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX), bottom: cardCursorY + footerH}, text: "MANAGED BY YOUR ORGANIZATION", font: fontSmall, color: cardMutedTextColor(), align: dtCenter | dtVCenter | dtSingleLine},
-	)
-	cardCursorY += footerH + s(2)
+	// Footer now carries the workspace slug ("Managed by {slug}") that used
+	// to sit directly under the device name — replacing the old, literal,
+	// un-interpolated "MANAGED BY YOUR ORGANIZATION" placeholder text that
+	// never actually read the real slug at all. Omitted entirely if the
+	// cache has no slug yet (e.g. a very first report right after
+	// registration) rather than showing an empty "Managed by" line.
+	if slugText != "" {
+		cardItems = append(cardItems,
+			drawItem{kind: drawKindText, rect: winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX), bottom: cardCursorY + footerH}, text: "Managed by " + slugText, font: fontSmall, color: cardMutedTextColor(), align: dtCenter | dtVCenter | dtSingleLine | dtEndEllipsis},
+		)
+		cardCursorY += footerH + s(2)
+	}
 	cardItems = append(cardItems,
 		drawItem{kind: drawKindText, rect: winRect{left: s(cardPadX), top: cardCursorY, right: cardWidthPx - s(cardPadX), bottom: cardCursorY + footerH}, text: "Updated " + formatRelativeTime(cache.UpdatedAt), font: fontSmall, color: cardMutedTextColor(), align: dtCenter | dtVCenter | dtSingleLine},
 	)

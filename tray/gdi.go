@@ -7,16 +7,19 @@
 // message loop) and card.go (the popup card's own logic) from being
 // crowded out by proc-binding boilerplate.
 //
-// Font choice: the card renders with the system "Segoe UI" family rather
-// than an embedded webfont. An earlier revision embedded a converted Outfit
-// TTF via AddFontMemResourceEx + a custom per-weight family name, but with
-// no local Windows/GDI available to this repo's build environment to
-// actually verify it rendered (see the root README's build notes), that
-// path shipped a real, silently-wrong result: GDI's font mapper fell back
-// to a default UI font with no error at any layer. Segoe UI is guaranteed
-// present on every supported Windows version and is exactly what a native
-// Win32 popup should look like anyway — trading a small brand-consistency
-// gap for a card that reliably renders as designed.
+// Font choice: the card privately loads 3 embedded static Outfit TTF
+// weights (Regular/SemiBold/Bold — see tray/fonts.go) via
+// AddFontMemResourceEx and renders with those; "Segoe UI" remains the
+// fallback family (ensureCardFonts in card.go) for the one case that can't
+// be verified ahead of time in this repo's offline build environment (no
+// local Windows/GDI to actually run AddFontMemResourceEx against) — if
+// registering any of the 3 weights fails at runtime, every font on the card
+// silently falls back to Segoe UI together rather than mixing Outfit and
+// Segoe UI on the same card, which would read as more broken than a
+// consistent (if not brand-exact) fallback. See fonts.go's doc comment for
+// why AddFontMemResourceEx over AddFontResourceEx+FR_PRIVATE, and why each
+// weight ships as its own distinct family name instead of 3 styles of one
+// "Outfit" family.
 package main
 
 import (
@@ -38,6 +41,7 @@ var (
 	procCreateRoundRectRgn     = modgdi32.NewProc("CreateRoundRectRgn")
 	procGetStockObject         = modgdi32.NewProc("GetStockObject")
 	procGetTextExtentPoint32W  = modgdi32.NewProc("GetTextExtentPoint32W")
+	procAddFontMemResourceEx   = modgdi32.NewProc("AddFontMemResourceEx")
 
 	procFillRect     = moduser32.NewProc("FillRect")
 	procDrawTextW    = moduser32.NewProc("DrawTextW")
@@ -216,4 +220,29 @@ func measureTextWidthPx(hdc uintptr, font uintptr, text string) int32 {
 	var size sizeT
 	procGetTextExtentPoint32W.Call(hdc, uintptr(unsafe.Pointer(&u[0])), uintptr(len(u)-1), uintptr(unsafe.Pointer(&size)))
 	return size.cx
+}
+
+// addFontMemResource registers `data` (a whole TTF file's bytes) as a
+// private, process-scoped font resource via AddFontMemResourceEx — nothing
+// is written to disk (unlike loadCardIcon/loadBannerBitmap's temp-file
+// extraction in card.go, which LoadImageW requires) and nothing this
+// process does here is visible to, or persists for, any other process.
+// Returns 0 on failure (family name from the font's own `name` table simply
+// won't resolve later); see fonts.go's loadEmbeddedFonts for the
+// all-or-nothing fallback this drives. The pNumFonts out-param is required
+// by the API but unused here — a TTF with more than one face isn't
+// something this repo ships (see fonts.go's doc comment on how these 3
+// files were built).
+func addFontMemResource(data []byte) uintptr {
+	if len(data) == 0 {
+		return 0
+	}
+	var numFonts uint32
+	h, _, _ := procAddFontMemResourceEx.Call(
+		uintptr(unsafe.Pointer(&data[0])),
+		uintptr(len(data)),
+		0,
+		uintptr(unsafe.Pointer(&numFonts)),
+	)
+	return h
 }

@@ -110,24 +110,32 @@ show tray UI directly.
   Per-Monitor-v2 DPI awareness (`SetProcessDpiAwarenessContext`) on startup
   so the icon renders crisp — not blurred/upscaled — on scaled displays.
 * **Click** (left or right — both open the same view) shows a status card: a
-  BlueSky-styled window (brand blue, rounded corners, the system Segoe UI
-  font) rather than a native popup menu, opened centered on screen but
-  freely drag-movable afterward (click anywhere on the card except the close
-  button/action buttons and drag — standard Win32 window-move behavior, not
-  a custom drag implementation). The header shows the Applivery SOAR banner
-  logo top-left, then this device's name (as reported by Applivery) in bold
-  and the workspace slug muted beneath it. Below that: what's currently
-  being reported (workspace, last report time/result, BitLocker/Firewall
-  status, whether app inventory is included), and this device's Compliance
-  Policy status — compliant/not, risk score and tier, and the applicable
-  policies for this platform with a per-policy OK/Violation pill. The card
-  sizes itself to whatever it needs to show (long device/policy names grow
-  it wider rather than truncating, up to 90% of the screen width) rather
-  than a fixed size. There is deliberately no link to the SOAR dashboard and
-  no way to exit the tray from here — this agent runs on end-user devices,
-  not admin machines, and the tray is part of the same tamper-resistance
-  story as the watchdog service above. Dismiss with the close button, `Esc`,
-  or by clicking elsewhere.
+  BlueSky-styled window (brand blue, rounded corners) rather than a native
+  popup menu, opened centered on screen but freely drag-movable afterward
+  (click anywhere on the card except the close button/action buttons and
+  drag — standard Win32 window-move behavior, not a custom drag
+  implementation). Text renders in the product's actual brand typeface —
+  Outfit, at Regular/SemiBold/Bold weights — via 3 static TTFs embedded
+  into the binary and privately registered at runtime with
+  `AddFontMemResourceEx` (`tray/fonts.go`; nothing written to disk, nothing
+  visible to other processes), falling back to the system Segoe UI font
+  wholesale if that registration ever fails rather than mixing typefaces.
+  The header shows the Applivery SOAR banner logo top-left, then this
+  device's name (as reported by Applivery) with a Status pill and the
+  compliance-state pill (Compliant / N issues / Unavailable) at the right
+  of that same line. Below that: what's currently being reported (last
+  report time/result, BitLocker/Firewall status, whether app inventory is
+  included), and this device's Compliance Policy status — risk score and
+  tier, and the applicable policies for this platform with a per-policy
+  OK/Violation pill. The footer reads "Managed by {workspace slug}"
+  followed by the card's own last-updated time. The card sizes itself to
+  whatever it needs to show (long device/policy names grow it wider rather
+  than truncating, up to 90% of the screen width) rather than a fixed size.
+  There is deliberately no link to the SOAR dashboard and no way to exit
+  the tray from here — this agent runs on end-user devices, not admin
+  machines, and the tray is part of the same tamper-resistance story as the
+  watchdog service above. Dismiss with the close button, `Esc`, or by
+  clicking elsewhere.
 * **"Force report" / "Force evaluate compliance" buttons**, right under the
   header, let the person at this device kick off an out-of-cycle report or
   compliance evaluation instead of waiting for the next scheduled tick
