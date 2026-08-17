@@ -241,9 +241,11 @@ mTLS Agent Authentication shows the exact nginx/NPM config (and the
 equivalent for Traefik/Caddy/HAProxy) plus whether the internal proxy secret
 is currently configured on this backend.
 
-**No macOS equivalent yet** — the macOS Agent repo has no mTLS support at
-all (still `ReportSecret`-only). A workspace enforcing mTLS today only works
-for Windows devices; flag this before enabling enforcement on a mixed fleet.
+**macOS parity:** the macOS Agent repo now implements the identical client
+logic (same endpoints, same Global Bootstrap Token model, same renewal
+window) — see that repo's own README §"mTLS Agent Authentication" for its
+one platform-specific difference (a root-owned Unix-permissions keystore
+instead of `icacls`).
 
 ---
 
