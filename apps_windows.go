@@ -56,7 +56,7 @@ type AppsPayload struct {
 }
 
 // GetInstalledApps prefers `winget list`, matching report-installed-apps.ps1
-// (Settings > Device Data Webhook): winget's PackageIdentifier (e.g.
+// (Settings > Applivery SOAR Agent): winget's PackageIdentifier (e.g.
 // "Mozilla.Firefox") is exactly what App Lists' Winget search source
 // returns, so a report from here matches those entries precisely — the
 // registry Uninstall-key fallback below has no cross-vendor stable

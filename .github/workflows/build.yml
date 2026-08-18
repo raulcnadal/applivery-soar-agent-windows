@@ -208,7 +208,7 @@ jobs:
       # 3. PUBLISH — rolling "latest" GitHub Release, same tag reused on
       #    every push to main (same pattern as applivery-soar's own
       #    docker-publish.yml :latest tag). This repo is private, so
-      #    the migrated SOAR app's Settings > Device Data Webhook page
+      #    the migrated SOAR app's Settings > Applivery SOAR Agent page
       #    proxies these release assets through its own backend (which
       #    needs a read-scoped GitHub token, configured there) rather
       #    than linking to github.com directly. PR builds only run the
