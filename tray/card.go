@@ -66,6 +66,20 @@ const (
 	wsExToolWindow = 0x00000080
 	wsExTopMost    = 0x00000008
 
+	// Acrylic/blur-behind backdrop (enableAcrylicBackdrop below) — the
+	// macOS menu bar app's NSVisualEffectView equivalent. accentEnable*
+	// values and WINDOWCOMPOSITIONATTRIBDATA/ACCENT_POLICY are undocumented
+	// (no dwmapi.h/user32.h public declaration — reverse-engineered, but the
+	// same mechanism Windows' own Start Menu/Action Center flyouts and
+	// countless real shipped Win32 apps use for exactly this "Fluent Design
+	// acrylic panel" look). accentEnableAcrylicBlurBehind specifically needs
+	// Windows 10 1803 (build 17134)+ — enableAcrylicBackdrop fails closed on
+	// anything older or if DWM composition is off (e.g. some RDP/Server
+	// sessions), leaving paintCard's existing fully-opaque fill as the
+	// fallback with zero behavior change there.
+	accentEnableAcrylicBlurBehind = 4
+	wcaAccentPolicy               = 19
+
 	smCxScreen = 0
 	smCyScreen = 1
 
@@ -128,7 +142,103 @@ var (
 	procDeleteDC           = modgdi32.NewProc("DeleteDC")
 	procStretchBlt         = modgdi32.NewProc("StretchBlt")
 	procSetStretchBltMode  = modgdi32.NewProc("SetStretchBltMode")
+
+	// dwmapi.dll — DwmIsCompositionEnabled/DwmExtendFrameIntoClientArea are
+	// both public, documented APIs; SetWindowCompositionAttribute (user32,
+	// not dwmapi) is the one undocumented piece Acrylic itself has no fully
+	// public alternative for on Windows 10/11 — see enableAcrylicBackdrop.
+	moddwmapi                        = syscall.NewLazyDLL("dwmapi.dll")
+	procDwmIsCompositionEnabled      = moddwmapi.NewProc("DwmIsCompositionEnabled")
+	procDwmExtendFrameIntoClientArea = moddwmapi.NewProc("DwmExtendFrameIntoClientArea")
+	procSetWindowCompositionAttribute = moduser32.NewProc("SetWindowCompositionAttribute")
 )
+
+// accentPolicy mirrors the undocumented ACCENT_POLICY struct (4 DWORDs, no
+// padding either side). GradientColor is 0xAABBGGRR — the byte order real
+// Win32 code for this API universally uses, NOT the 0xAARRGGBB most Windows
+// color APIs otherwise use, a well-documented (if undocumented-API) gotcha.
+type accentPolicy struct {
+	AccentState   int32
+	AccentFlags   int32
+	GradientColor uint32
+	AnimationID   int32
+}
+
+// winCompAttrData mirrors WINDOWCOMPOSITIONATTRIBDATA — Go's struct layout
+// naturally inserts the same padding the real C struct has (an int32
+// Attrib followed by two 8-byte-aligned fields on amd64/arm64), so no
+// explicit padding field is needed.
+type winCompAttrData struct {
+	Attrib uint32
+	PvData uintptr
+	CbData uintptr
+}
+
+// dwmMargins mirrors the MARGINS struct DwmExtendFrameIntoClientArea takes.
+type dwmMargins struct {
+	Left, Right, Top, Bottom int32
+}
+
+// enableAcrylicBackdrop is the card window's equivalent of the macOS menu
+// bar app's NSVisualEffectView(material: .popover) — a real, blurred,
+// translucent backdrop behind the card content instead of a flat opaque
+// fill. Two calls, both best-effort and silently no-op-safe (this function
+// returns false and paintCard falls back to its original fully-opaque fill
+// — see the cardAcrylicActive check there — rather than risking a panic or
+// a visibly broken window on any Windows build/session where either isn't
+// available):
+//
+//  1. DwmExtendFrameIntoClientArea with all-(-1) margins marks the card's
+//     ENTIRE client area as DWM-composited "glass" — the documented,
+//     public mechanism (originally Vista/7-era Aero Glass, generalized
+//     since to whatever Accent Policy material is set below) by which
+//     GDI content painted as pure RGB(0,0,0) becomes see-through to
+//     whatever DWM composites behind the window, instead of opaque black.
+//     paintCard's base fill uses exactly that sentinel color when this
+//     returns true — nothing else this card draws uses pure black (see
+//     the color palette in gdi.go), so only the empty background actually
+//     becomes translucent; every real UI element stays fully opaque.
+//  2. SetWindowCompositionAttribute (undocumented, but the same call every
+//     real Win32 Acrylic-style app uses — there is no public alternative
+//     for true Acrylic specifically) sets WHICH material renders behind
+//     that glass area and its tint/opacity via ACCENT_POLICY.GradientColor
+//     — near-white for the light theme, near-black for dark, ~78% alpha
+//     (0xC8), close to Fluent Design's own default flyout opacity.
+//
+// Unverified beyond compiling — this repo has no local Windows/DWM to
+// actually render this against (see ARCHITECTURE.md §7); needs a real-
+// device check once CI (build.yml) produces a build.
+func enableAcrylicBackdrop(hwnd uintptr, light bool) bool {
+	if err := procDwmIsCompositionEnabled.Find(); err != nil {
+		return false
+	}
+	var composited int32
+	if ret, _, _ := procDwmIsCompositionEnabled.Call(uintptr(unsafe.Pointer(&composited))); ret != 0 || composited == 0 {
+		return false
+	}
+	if err := procDwmExtendFrameIntoClientArea.Find(); err != nil {
+		return false
+	}
+	if err := procSetWindowCompositionAttribute.Find(); err != nil {
+		return false
+	}
+
+	margins := dwmMargins{Left: -1, Right: -1, Top: -1, Bottom: -1}
+	if ret, _, _ := procDwmExtendFrameIntoClientArea.Call(hwnd, uintptr(unsafe.Pointer(&margins))); ret != 0 {
+		return false
+	}
+
+	var gradientColor uint32
+	if light {
+		gradientColor = 0xC8FCFCFC // alpha 0xC8 (~78%), near-white tint
+	} else {
+		gradientColor = 0xC81E1E1E // alpha 0xC8 (~78%), near-black (NOT pure black) tint
+	}
+	policy := accentPolicy{AccentState: accentEnableAcrylicBlurBehind, GradientColor: gradientColor}
+	data := winCompAttrData{Attrib: wcaAccentPolicy, PvData: uintptr(unsafe.Pointer(&policy)), CbData: uintptr(unsafe.Sizeof(policy))}
+	ret, _, _ := procSetWindowCompositionAttribute.Call(hwnd, uintptr(unsafe.Pointer(&data)))
+	return ret != 0
+}
 
 // Color palette — sourced from the applivery-bluesky-design-system repo's
 // src/styles/design-tokens.ts (colorBrand/colorSemantic), the same tokens
@@ -241,6 +351,11 @@ var (
 	cardHwnd            uintptr
 	cardClassRegistered bool
 	cardIsLight         bool
+	// cardAcrylicActive — set by enableAcrylicBackdrop on every showCard
+	// call; paintCard's base fill checks this to decide between the
+	// translucent glass fill (true) and the original fully-opaque one
+	// (false, the safe fallback wherever Acrylic couldn't be enabled).
+	cardAcrylicActive bool
 	cardScale           float64 = 1.0
 	cardWidthPx         int32
 	cardHeight          int32
@@ -923,6 +1038,12 @@ func showCard() {
 	}
 	cardHwnd = hwnd
 
+	// Best-effort — see enableAcrylicBackdrop's own doc comment for exactly
+	// what this does and why it's safe to fail silently (older Windows, DWM
+	// composition off, etc.). Must run before the first WM_PAINT so
+	// paintCard's fill choice below is correct from frame one.
+	cardAcrylicActive = enableAcrylicBackdrop(hwnd, cardIsLight)
+
 	radius := s(cardCornerRadius)
 	rgn, _, _ := procCreateRoundRectRgn.Call(0, 0, uintptr(cardWidthPx), uintptr(cardHeight), uintptr(radius), uintptr(radius))
 	if rgn != 0 {
@@ -935,6 +1056,17 @@ func showCard() {
 
 func paintCard(hdc uintptr) {
 	bg := cardSurfaceColor(cardIsLight)
+	if cardAcrylicActive {
+		// RGB(0,0,0) is the "punch a hole to the glass" sentinel color
+		// DwmExtendFrameIntoClientArea established for this window's whole
+		// client area (enableAcrylicBackdrop) — painting the base rect with
+		// it makes the empty background translucent/blurred instead of a
+		// flat fill, the same "blur peeks through empty space, real content
+		// stays opaque" look the macOS panel's NSVisualEffectView gives for
+		// free. Nothing else this card draws uses pure black (see gdi.go's
+		// color palette), so only this base fill is affected.
+		bg = colorref(0, 0, 0)
+	}
 	full := winRect{left: 0, top: 0, right: cardWidthPx, bottom: cardHeight}
 	roundRectFill(hdc, &full, s(cardCornerRadius), bg)
 	procSetBkMode.Call(hdc, uintptr(transparentBkMode))
@@ -1065,6 +1197,7 @@ func cardWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			cardBannerHandle = 0
 		}
 		cardHwnd = 0
+		cardAcrylicActive = false
 		return 0
 	}
 	ret, _, _ := procDefWindowProcW.Call(hwnd, msg, wParam, lParam)
