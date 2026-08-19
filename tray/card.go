@@ -156,8 +156,7 @@ var (
 // the SOAR web app itself is built on, rather than eyeballed from
 // screenshots — so the card reads as the same product as the dashboard.
 var (
-	colBrand    = colorref(2, 65, 227)   // #0241E3 — brand-600 (Button primary)
-	colBrand700 = colorref(2, 53, 192)   // #0235C0 — brand-700 (Button secondary border/text)
+	colBrand    = colorref(2, 65, 227)   // #0241E3 — brand-600 (Button primary, both action buttons)
 	colSuccess  = colorref(34, 197, 94)  // #22C55E — green-500, compliant/OK
 	colDanger   = colorref(239, 68, 68)  // #EF4444 — red-500, violation/high severity
 	colWarning  = colorref(245, 158, 11) // #F59E0B — medium severity
@@ -167,7 +166,8 @@ var (
 	colGray900  = colorref(17, 24, 39) // dark-theme surface
 	colGray200  = colorref(229, 231, 235)
 	colGray700  = colorref(55, 65, 81)
-	colGray400  = colorref(156, 163, 175) // muted text, both themes
+	colGray600  = colorref(75, 85, 99)    // #4B5563 — gray-600, light-mode muted text
+	colGray400  = colorref(156, 163, 175) // #9CA3AF — gray-400, dark-mode muted text
 )
 
 // blendColor approximates drawing `fg` at `fgAlpha` opacity over an opaque
@@ -211,7 +211,19 @@ func cardPrimaryTextColor(light bool) uintptr {
 	return colWhite
 }
 
+// cardMutedTextColor was a single hardcoded gray4 (colGray400) for both
+// themes — a real contrast bug, not a stylistic choice: colGray400
+// (#9CA3AF) on the dark surface (colGray900, #111827) reads at roughly
+// 7:1 contrast, comfortably past WCAG AA, but the identical value on the
+// light surface (colWhite) only reaches roughly 2.5:1 — well under AA's
+// 4.5:1 floor for normal text, and worse yet for the footer, which renders
+// this same color at fontSmall. colGray600 is the light-mode equivalent,
+// chosen to land at a comparable ~7:1 against white rather than just
+// nudging past the AA floor.
 func cardMutedTextColor() uintptr {
+	if cardIsLight {
+		return colGray600
+	}
 	return colGray400
 }
 
@@ -406,13 +418,16 @@ func ptInRect(pt point, r winRect) bool {
 
 // addActionButtons lays out the "Force report" / "Force evaluate
 // compliance" pair side by side, full-width, right under the header,
-// matching applivery-bluesky-design-system's Button.tsx exactly rather than
-// improvising a look: rounded-lg (radius 8), 14px font-normal label
-// (fontBody, not the pills' fontPill), primary variant solid brand-600/
-// white, secondary variant white/transparent with a brand-700 border and
-// brand-700 text — not the muted gray this used before, which was the main
-// reason the two buttons and the pills below them read as unrelated
-// components rather than one consistent design system.
+// matching applivery-bluesky-design-system's Button.tsx: rounded-lg
+// (radius 8), 14px font-normal label (fontBody, not the pills' fontPill).
+// Both buttons render as Button.tsx's primary variant (solid brand-600
+// fill, white text) — an earlier pass gave "Force report" the secondary
+// variant instead (white/transparent, brand-700 border+text) to visually
+// distinguish it from "Force evaluate compliance", but that outline read as
+// low-contrast/washed-out against the light-mode card surface and made the
+// two actions look like they carried different weight when they don't
+// (neither is more "primary" than the other — both fire an equally
+// immediate action). Solid fill for both fixes both problems at once.
 func addActionButtons() {
 	h := s(32)
 	gap := s(10)
@@ -422,7 +437,7 @@ func addActionButtons() {
 	cardForceEvaluateRect = winRect{left: s(cardPadX) + btnW + gap, top: top, right: s(cardPadX) + btnW + gap + btnW, bottom: top + h}
 	textAlign := uintptr(dtCenter | dtVCenter | dtSingleLine | dtEndEllipsis)
 	cardItems = append(cardItems,
-		drawItem{kind: drawKindPill, rect: cardForceReportRect, text: "Force report", font: fontBody, color: colBrand700, bgColor: colBrand700, align: textAlign, radius: s(8), outline: true},
+		drawItem{kind: drawKindPill, rect: cardForceReportRect, text: "Force report", font: fontBody, color: colWhite, bgColor: colBrand, align: textAlign, radius: s(8)},
 		drawItem{kind: drawKindPill, rect: cardForceEvaluateRect, text: "Force evaluate compliance", font: fontBody, color: colWhite, bgColor: colBrand, align: textAlign, radius: s(8)},
 	)
 	// Trailing gap below the buttons: previously 16px, tuned smaller when
