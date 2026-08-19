@@ -59,15 +59,16 @@ import (
 
 // tray_light.ico / tray_dark.ico are the small monochrome-ish glyph shown
 // IN the notification area itself (loaded at SM_CXSMICON/SM_CYSMICON via
-// loadThemedIcon below) — a separate design from icons/app-icon.ico, which
-// is the app's own identity icon embedded into Applivery-SOAR-Tray.exe's
-// IDI_APPLICATION resource at build time (see versioninfo/tray.json's
-// IconPath and .github/workflows/build.yml's goversioninfo step) and is
-// what Windows shows to attribute a balloon notification to this app —
-// including the Force Report / Force Evaluate Compliance notifications,
-// since showBalloon below doesn't set its own hIcon.
+// loadThemedIcon below). icons/app-icon.ico is a separate design — the
+// app's own identity icon — used two ways: embedded into
+// Applivery-SOAR-Tray.exe's IDI_APPLICATION resource at build time (see
+// versioninfo/tray.json's IconPath and .github/workflows/build.yml's
+// goversioninfo step), and loaded here at runtime as balloonIconHandle so
+// showBalloon can set it as the large icon on every notification this app
+// raises (NIIF_USER + NIIF_LARGE_ICON) instead of Windows' stock
+// info/warning glyph.
 //
-//go:embed icons/tray_light.ico icons/tray_dark.ico icons/banner_light.bmp icons/banner_dark.bmp
+//go:embed icons/tray_light.ico icons/tray_dark.ico icons/app-icon.ico icons/banner_light.bmp icons/banner_dark.bmp
 var iconFS embed.FS
 
 const (
@@ -89,8 +90,15 @@ const (
 	nifTip     = 0x00000004
 	nifInfo    = 0x00000010
 
-	niifInfo    = 0x00000001
-	niifWarning = 0x00000002
+	// niifInfo is only a fallback (see showBalloon) for the rare case
+	// balloonIconHandle failed to load. niifUser + niifLargeIcon together
+	// tell Shell_NotifyIcon to render the custom hBalloonIcon instead of one
+	// of the stock info/warning/error glyphs — NIIF_INFO/NIIF_WARNING/
+	// NIIF_USER are a mutually-exclusive "which stock icon" enum, not flags
+	// that layer on top of a custom icon.
+	niifInfo      = 0x00000001
+	niifUser      = 0x00000004
+	niifLargeIcon = 0x00000020
 
 	imageIcon      = 1
 	lrLoadFromFile = 0x00000010
@@ -199,13 +207,15 @@ type notifyIconData struct {
 }
 
 var (
-	mainHwnd        uintptr
-	lightIconPath   string
-	darkIconPath    string
-	lightBannerPath string
-	darkBannerPath  string
-	trayIconHandle  uintptr
-	trayIsLightMode bool
+	mainHwnd          uintptr
+	lightIconPath     string
+	darkIconPath      string
+	appIconPath       string
+	lightBannerPath   string
+	darkBannerPath    string
+	trayIconHandle    uintptr
+	balloonIconHandle uintptr
+	trayIsLightMode   bool
 
 	// lastViolationCount tracks the previous poll's violation count so
 	// checkComplianceTransition can fire a balloon only on an actual
@@ -249,11 +259,11 @@ func isLightTheme() bool {
 	return true
 }
 
-func loadThemedIcon(light bool) uintptr {
-	path := darkIconPath
-	if light {
-		path = lightIconPath
-	}
+// loadIconFile loads an .ico file at an explicit pixel size via
+// LoadImageW/LR_LOADFROMFILE — shared by loadThemedIcon (tray icon, sized to
+// the system's small-icon metric) and the one-time balloonIconHandle load in
+// main() (sized to 32x32, the size NIIF_LARGE_ICON expects).
+func loadIconFile(path string, cx, cy int32) uintptr {
 	if path == "" {
 		return 0
 	}
@@ -261,10 +271,18 @@ func loadThemedIcon(light bool) uintptr {
 	if err != nil {
 		return 0
 	}
+	h, _, _ := procLoadImageW.Call(0, uintptr(unsafe.Pointer(pathPtr)), uintptr(imageIcon), uintptr(cx), uintptr(cy), uintptr(lrLoadFromFile))
+	return h
+}
+
+func loadThemedIcon(light bool) uintptr {
+	path := darkIconPath
+	if light {
+		path = lightIconPath
+	}
 	cx, _, _ := procGetSystemMetrics.Call(uintptr(smCxSmIcon))
 	cy, _, _ := procGetSystemMetrics.Call(uintptr(smCySmIcon))
-	h, _, _ := procLoadImageW.Call(0, uintptr(unsafe.Pointer(pathPtr)), uintptr(imageIcon), cx, cy, uintptr(lrLoadFromFile))
-	return h
+	return loadIconFile(path, int32(cx), int32(cy))
 }
 
 func copyToUTF16Buf(dst []uint16, s string) {
@@ -367,13 +385,27 @@ func removeTrayIcon() {
 // (NOTIFYICONDATAW already declares these fields). Deliberately not the
 // WinRT ToastNotificationManager route (COM/WinRT interop this repo has no
 // need to take on for a two-message-type notification).
-func showBalloon(title, msg string, infoFlags uint32) {
+//
+// Every notification uses the same custom Applivery icon (balloonIconHandle,
+// NIIF_USER + NIIF_LARGE_ICON) rather than Windows' stock info/warning
+// glyph — NIIF_INFO/NIIF_WARNING/NIIF_USER are a mutually-exclusive "which
+// icon" enum, not independent flags, so a custom icon requires NIIF_USER on
+// every call regardless of the message's severity. If balloonIconHandle
+// failed to load (e.g. the embedded .ico couldn't be extracted to disk),
+// dwInfoFlags falls back to NIIF_INFO so the balloon still shows Windows'
+// own generic icon rather than silently rendering with no icon at all.
+func showBalloon(title, msg string) {
+	infoFlags := uint32(niifInfo)
+	if balloonIconHandle != 0 {
+		infoFlags = niifUser | niifLargeIcon
+	}
 	data := notifyIconData{
-		cbSize:      uint32(unsafe.Sizeof(notifyIconData{})),
-		hWnd:        mainHwnd,
-		uID:         trayIconID,
-		uFlags:      nifInfo,
-		dwInfoFlags: infoFlags,
+		cbSize:       uint32(unsafe.Sizeof(notifyIconData{})),
+		hWnd:         mainHwnd,
+		uID:          trayIconID,
+		uFlags:       nifInfo,
+		dwInfoFlags:  infoFlags,
+		hBalloonIcon: balloonIconHandle,
 	}
 	copyToUTF16Buf(data.szInfo[:], msg)
 	copyToUTF16Buf(data.szInfoTitle[:], title)
@@ -395,7 +427,7 @@ func triggerForceReport() {
 		log.Printf("Could not write force-report trigger: %v", err)
 		return
 	}
-	showBalloon("Applivery SOAR", "Reporting to Applivery SOAR now…", niifInfo)
+	showBalloon("Applivery SOAR", "Reporting to Applivery SOAR now…")
 }
 
 func triggerForceEvaluate() {
@@ -403,7 +435,7 @@ func triggerForceEvaluate() {
 		log.Printf("Could not write force-evaluate trigger: %v", err)
 		return
 	}
-	showBalloon("Applivery SOAR", "Evaluating compliance now…", niifInfo)
+	showBalloon("Applivery SOAR", "Evaluating compliance now…")
 }
 
 func pluralPolicy(n int) string {
@@ -427,9 +459,9 @@ func checkComplianceTransition(cache *agentstatus.StatusCache) {
 		return
 	}
 	if count > 0 && lastViolationCount == 0 {
-		showBalloon("Compliance issue detected", fmt.Sprintf("%d %s now failing on this device.", count, pluralPolicy(count)), niifWarning)
+		showBalloon("Compliance issue detected", fmt.Sprintf("%d %s now failing on this device.", count, pluralPolicy(count)))
 	} else if count == 0 && lastViolationCount > 0 {
-		showBalloon("Compliance restored", "This device is compliant with all applicable policies again.", niifInfo)
+		showBalloon("Compliance restored", "This device is compliant with all applicable policies again.")
 	}
 	lastViolationCount = count
 }
@@ -544,6 +576,15 @@ func main() {
 	darkIconPath, err = extractIcon("tray_dark.ico")
 	if err != nil {
 		log.Printf("Could not extract dark-theme icon: %v", err)
+	}
+	appIconPath, err = extractIcon("app-icon.ico")
+	if err != nil {
+		log.Printf("Could not extract app icon: %v", err)
+	} else {
+		// 32x32 — the size NIIF_LARGE_ICON expects (showBalloon sets it on
+		// every notification so Windows renders our own icon instead of its
+		// stock info/warning glyph).
+		balloonIconHandle = loadIconFile(appIconPath, 32, 32)
 	}
 	lightBannerPath, err = extractIcon("banner_light.bmp")
 	if err != nil {
