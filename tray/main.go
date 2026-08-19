@@ -57,17 +57,15 @@ import (
 	"github.com/raulcnadal/applivery-soar-agent-windows/internal/agentstatus"
 )
 
-// tray_light.ico / tray_dark.ico are both the same Applivery mark — a
-// fixed-color badge (icons/app-icon.svg) rather than a theme-inverting
-// glyph, so it doesn't need separate light/dark artwork the way the tray
-// card's banner_light.bmp/banner_dark.bmp do. Both .ico files are
-// multi-resolution (16/20/24/32/40/48/64/256px), rasterized offline from
-// app-icon.svg via cairosvg + Pillow so Windows can pick whichever frame
-// matches SM_CXSMICON/SM_CYSMICON at the current DPI (loadThemedIcon below)
-// without runtime upscaling blur. This is also the icon shown on the Force
-// Report / Force Evaluate Compliance balloon notifications — showBalloon
-// doesn't set its own hIcon, so it inherits whichever of these two the tray
-// icon is currently showing (addTrayIcon/refreshTrayIcon).
+// tray_light.ico / tray_dark.ico are the small monochrome-ish glyph shown
+// IN the notification area itself (loaded at SM_CXSMICON/SM_CYSMICON via
+// loadThemedIcon below) — a separate design from icons/app-icon.ico, which
+// is the app's own identity icon embedded into Applivery-SOAR-Tray.exe's
+// IDI_APPLICATION resource at build time (see versioninfo/tray.json's
+// IconPath and .github/workflows/build.yml's goversioninfo step) and is
+// what Windows shows to attribute a balloon notification to this app —
+// including the Force Report / Force Evaluate Compliance notifications,
+// since showBalloon below doesn't set its own hIcon.
 //
 //go:embed icons/tray_light.ico icons/tray_dark.ico icons/banner_light.bmp icons/banner_dark.bmp
 var iconFS embed.FS

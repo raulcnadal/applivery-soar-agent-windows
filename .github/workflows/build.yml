@@ -46,9 +46,14 @@ jobs:
       # needed. This is what gives each exe a real embedded VERSIONINFO
       # resource (FileVersion, CompanyName, ProductName, ...) instead of
       # Windows falling back to showing "0.0.0.0"/no publisher in Explorer's
-      # Properties dialog and in Windows Error Reporting. continue-on-error
-      # here: version metadata is cosmetic, never worth failing the whole
-      # build over if the tool's CLI surface has drifted.
+      # Properties dialog and in Windows Error Reporting. Each JSON also
+      # sets IconPath (tray/icons/app-icon.ico) so the compiled exe carries
+      # a real Applivery icon as its IDI_APPLICATION resource — this is what
+      # Windows shows as the app's identity icon on Shell_NotifyIcon balloon
+      # notifications (tray/main.go's showBalloon) instead of falling back
+      # to a generic default icon when Applivery-SOAR-Tray.exe has none.
+      # continue-on-error here: version metadata is cosmetic, never worth
+      # failing the whole build over if the tool's CLI surface has drifted.
       - name: Install goversioninfo
         continue-on-error: true
         shell: bash

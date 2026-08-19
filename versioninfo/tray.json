@@ -1,4 +1,5 @@
 {
+  "IconPath": "tray/icons/app-icon.ico",
   "FixedFileInfo": {
     "FileVersion": { "Major": 1, "Minor": 0, "Patch": 0, "Build": 0 },
     "ProductVersion": { "Major": 1, "Minor": 0, "Patch": 0, "Build": 0 },
