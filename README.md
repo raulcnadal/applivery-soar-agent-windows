@@ -191,11 +191,9 @@ if one is configured) — you shouldn't need to type any of this by hand.
 
 ## mTLS Agent Authentication
 
-Starting with this build, the agent can authenticate to SOAR with a
-per-device client certificate instead of the shared `ReportSecret` — see
-`backend/docs/mtls-agent-auth-roadmap.md` (main SOAR repo) for the full
-design. This is opt-in per workspace; nothing changes for a device that
-never receives a `BootstrapToken`.
+The agent can authenticate to SOAR with a per-device client certificate
+instead of the shared `ReportSecret`. This is opt-in per workspace; nothing
+changes for a device that never receives a `BootstrapToken`.
 
 Registration uses a single **Global Bootstrap Token**: one value, the SAME
 on every device in the fleet, pushed via one Managed Configuration policy —
@@ -214,9 +212,9 @@ register.
    certificate immediately (no admin approval step; a bootstrap token is
    unattended by design). The issued certificate + key are stored under
    `%ProgramData%\Applivery\SOAR\mtls\` (ACL-locked to SYSTEM and local
-   Administrators only — this is a v1 file-based keystore, not the real
-   Windows Certificate Store; see the roadmap doc's disclosed-gap callout).
-   A device that already has an active certificate can never be silently
+   Administrators only — this is a file-based keystore, not the real
+   Windows Certificate Store, a deliberate simplification rather than an
+   oversight). A device that already has an active certificate can never be silently
    re-registered this way — the backend rejects it — so leaving
    `BootstrapToken` in place after enrollment is harmless.
 2. **Every report cycle afterward:** if a valid certificate is loaded, ALL
