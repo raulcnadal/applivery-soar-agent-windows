@@ -66,19 +66,24 @@ const (
 	wsExToolWindow = 0x00000080
 	wsExTopMost    = 0x00000008
 
-	// A DWM Acrylic/blur-behind backdrop (matching the macOS menu bar app's
-	// NSVisualEffectView panel) was tried here via DwmExtendFrameIntoClientArea
-	// + the undocumented SetWindowCompositionAttribute Accent Policy API, on
-	// the premise that GDI content painted as pure RGB(0,0,0) becomes
-	// see-through to the composited material. Reverted after real-device
-	// testing showed it doesn't hold reliably on this build: the tint/blur
-	// bled across the ENTIRE window (including opaque content, not just the
-	// empty background), washing out light-theme text to the point of
-	// unreadability and putting a translucent halo around the otherwise-
-	// opaque banner bitmap — plausibly also behind a stuck oversized window
-	// observed once after a reboot. No local Windows/DWM in this project's
-	// own tooling to iterate against live, so rather than guess again blind,
-	// this card stays fully opaque (paintCard's original fill, below).
+	// wsExLayered enables the DWM Acrylic/blur-behind backdrop matching the
+	// macOS menu bar app's NSVisualEffectView panel (acrylic_windows.go,
+	// layeredpaint_windows.go). A first attempt at this (DwmExtendFrameIntoClientArea
+	// + SetWindowCompositionAttribute, painting pure RGB(0,0,0) as a
+	// chroma-keyed "see-through" sentinel) was reverted after real-device
+	// testing showed the blur bleeding into opaque content — ClearType's own
+	// anti-aliasing blends text edges toward whatever color sits behind
+	// them, and blending toward the transparent sentinel made those edges
+	// partially see-through too, washing out light-theme text and haloing
+	// the banner bitmap. This second attempt doesn't chroma-key anything:
+	// layeredpaint_windows.go composites a real, explicit alpha channel for
+	// every pixel (rebuilt from the *presence* of a color difference against
+	// an untouched-buffer snapshot, not from matching one specific "magic"
+	// color), then presents it via UpdateLayeredWindow — see that file's
+	// doc comment for the full mechanism. Still unverified on a real
+	// Windows/DWM build (none available in this repo's own tooling); see
+	// ARCHITECTURE.md for what to check visually before this ships.
+	wsExLayered = 0x00080000
 
 	smCxScreen = 0
 	smCyScreen = 1
@@ -998,7 +1003,7 @@ func showCard() {
 	}
 
 	hwnd, _, _ := procCreateWindowExW.Call(
-		uintptr(wsExToolWindow|wsExTopMost),
+		uintptr(wsExToolWindow|wsExTopMost|wsExLayered),
 		uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(title)),
 		uintptr(wsPopup),
@@ -1016,14 +1021,46 @@ func showCard() {
 		procSetWindowRgn.Call(hwnd, rgn, 1)
 	}
 
+	// Best-effort — see acrylic_windows.go's doc comment. Whether or not DWM
+	// agrees to blur anything behind the window, the card itself is always
+	// fully legible: layeredpaint_windows.go's compositing produces a real
+	// per-pixel alpha channel regardless, so an OS that ignores this call
+	// just shows that composited content against whatever's on the desktop
+	// unblurred, not against nothing.
+	enableBlurBackdrop(hwnd)
+
+	// A WS_EX_LAYERED window's content is presented exclusively via
+	// UpdateLayeredWindow — per its own documentation, such a window isn't
+	// guaranteed to ever receive an ordinary WM_PAINT the way every other
+	// window in this repo relies on, so this card's one and only paint
+	// (its content is built once above and never changes after this point)
+	// has to be triggered explicitly here rather than left to arrive
+	// asynchronously through cardWndProc's wmPaint case, which stays in
+	// place purely as a defensive fallback in case Windows does send one
+	// anyway (e.g. after a DPI change).
+	paintAndPresentCard(hwnd)
+
 	procShowWindow.Call(hwnd, uintptr(swShow))
 	procSetForegroundWin.Call(hwnd)
 }
 
-func paintCard(hdc uintptr) {
+// paintCardBackground draws only the card's own rounded-rect surface fill —
+// split out from what used to be the start of a single paintCard so
+// layeredpaint_windows.go's wmPaint handler can snapshot the offscreen
+// buffer between this and paintCardForeground below, which is what lets it
+// tell "background" and "foreground" pixels apart afterward without
+// touching (or needing to understand) anything this function actually
+// draws. See that file's doc comment for the full compositing sequence.
+func paintCardBackground(hdc uintptr) {
 	bg := cardSurfaceColor(cardIsLight)
 	full := winRect{left: 0, top: 0, right: cardWidthPx, bottom: cardHeight}
 	roundRectFill(hdc, &full, s(cardCornerRadius), bg)
+}
+
+// paintCardForeground draws everything else the card has always drawn —
+// unchanged from before this file's WS_EX_LAYERED pass except for being
+// split out of paintCard (see paintCardBackground above).
+func paintCardForeground(hdc uintptr) {
 	procSetBkMode.Call(hdc, uintptr(transparentBkMode))
 
 	for i := range cardItems {
@@ -1092,11 +1129,14 @@ func paintCard(hdc uintptr) {
 func cardWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 	switch uint32(msg) {
 	case wmPaint:
+		// BeginPaint/EndPaint here only validate the update region so
+		// Windows stops re-posting WM_PAINT — the card is WS_EX_LAYERED, so
+		// its actual content is never presented through this hdc at all
+		// (that would be silently ignored by DWM). See layeredpaint_windows.go's
+		// doc comment for the real presentation path this delegates to.
 		var ps paintStruct
-		hdc, _, _ := procBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
-		if hdc != 0 {
-			paintCard(hdc)
-		}
+		procBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
+		paintAndPresentCard(hwnd)
 		procEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 		return 0
 	case wmNcHitTest:
