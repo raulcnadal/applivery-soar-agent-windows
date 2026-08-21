@@ -10,7 +10,9 @@ import (
 	"encoding/json"
 	"log"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +49,18 @@ type InstalledApp struct {
 	// agent doesn't make. Purely informational (surfaced in SOAR's App
 	// detail modal); never used for identifier/matching logic.
 	InstallLocation string `json:"installLocation,omitempty"`
+	// Sha256 is the lowercase-hex SHA256 of the app's main executable, when
+	// this agent could resolve a real file path to hash (see
+	// resolveExePathFromDisplayIcon and getAppsViaAppx's Executable
+	// manifest-attribute read below). Never populated for winget-sourced
+	// entries — `winget list` surfaces no install path at all, and a second
+	// per-package query to derive one isn't made. Feeds SOAR's Binary
+	// Integrity feature (backend/docs/settings.md#binary-integrity):
+	// VirusTotal file-reputation lookup to flag sideloaded/tampered
+	// binaries, independent of CVE/version-based vulnerability matching.
+	// Self-reported only — Applivery's own server-fetched app inventory has
+	// no equivalent field.
+	Sha256 string `json:"sha256,omitempty"`
 }
 
 type AppsPayload struct {
@@ -99,6 +113,7 @@ func GetInstalledApps() []InstalledApp {
 		seen[id] = true
 		apps = append(apps, a)
 	}
+	saveAppHashCache()
 	return apps
 }
 
@@ -218,6 +233,7 @@ func getAppsViaRegistry() []InstalledApp {
 			displayVersion, _, _ := subKey.GetStringValue("DisplayVersion")
 			systemComponent, _, _ := subKey.GetIntegerValue("SystemComponent")
 			installLocation, _, _ := subKey.GetStringValue("InstallLocation")
+			displayIcon, _, _ := subKey.GetStringValue("DisplayIcon")
 			subKey.Close()
 
 			if errName != nil || strings.TrimSpace(displayName) == "" || systemComponent == 1 {
@@ -238,11 +254,40 @@ func getAppsViaRegistry() []InstalledApp {
 				Version:         displayVersion,
 				Origin:          "msi",
 				InstallLocation: strings.TrimSpace(installLocation),
+				Sha256:          hashExecutableCached(resolveExePathFromDisplayIcon(displayIcon)),
 			})
 		}
 	}
 
 	return apps
+}
+
+// resolveExePathFromDisplayIcon extracts a real, hashable .exe path from a
+// Registry Uninstall key's DisplayIcon value, when possible. DisplayIcon is
+// only ever a heuristic here — it's meant for Control Panel's icon display,
+// not a documented "here's the app's main binary" contract — so this is
+// deliberately conservative: many installers point DisplayIcon at a .ico
+// resource, an uninstaller instead of the app itself, or omit it entirely,
+// all of which fall through to "" (no hash attempted) rather than guessing.
+// The two things that do need handling: a trailing ",<iconIndex>" suffix
+// (e.g. `"C:\Program Files\App\app.exe",0`, very common) and surrounding
+// quotes. hashExecutableCached itself stats the result, so a path that
+// looks plausible but doesn't actually exist just silently yields no hash.
+func resolveExePathFromDisplayIcon(raw string) string {
+	v := strings.TrimSpace(strings.Trim(strings.TrimSpace(raw), `"`))
+	if v == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(v, ","); idx >= 0 {
+		if _, err := strconv.Atoi(strings.TrimSpace(v[idx+1:])); err == nil {
+			v = strings.TrimSpace(v[:idx])
+		}
+	}
+	v = strings.Trim(v, `"`)
+	if !strings.HasSuffix(strings.ToLower(v), ".exe") {
+		return ""
+	}
+	return v
 }
 
 // getAppsViaAppx enumerates AppX/UWP packages (Store apps, and Windows' own
@@ -328,6 +373,7 @@ public class ApplveryAppxRes {
 $pkgs = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Where-Object { -not $_.IsFramework -and -not $_.IsResourcePackage })
 $apps = @($pkgs | ForEach-Object {
     $displayName = $null
+    $executable = $null
     $installLocation = $_.InstallLocation
     try {
         if ($installLocation) {
@@ -347,10 +393,14 @@ $apps = @($pkgs | ForEach-Object {
                         $displayName = $raw.ToString()
                     }
                 }
+                try {
+                    $app = $manifest.Package.Applications.Application | Select-Object -First 1
+                    if ($app -and $app.Executable) { $executable = $app.Executable.ToString() }
+                } catch {}
             }
         }
     } catch {}
-    [PSCustomObject]@{ Name = $_.Name; Version = $_.Version; DisplayName = $displayName; InstallLocation = $installLocation }
+    [PSCustomObject]@{ Name = $_.Name; Version = $_.Version; DisplayName = $displayName; InstallLocation = $installLocation; Executable = $executable }
 })
 ConvertTo-Json -InputObject $apps -Compress
 `
@@ -371,6 +421,7 @@ ConvertTo-Json -InputObject $apps -Compress
 		Version         string `json:"Version"`
 		DisplayName     string `json:"DisplayName"`
 		InstallLocation string `json:"InstallLocation"`
+		Executable      string `json:"Executable"`
 	}
 	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &raw); err != nil {
 		log.Printf("Could not parse Get-AppxPackage output (Store/system apps will be missing from this report): %v", err)
@@ -400,12 +451,18 @@ ConvertTo-Json -InputObject $apps -Compress
 		if displayName == "" || strings.HasPrefix(strings.ToLower(displayName), "ms-resource") {
 			displayName = name
 		}
+		installLocation := strings.TrimSpace(a.InstallLocation)
+		var exePath string
+		if installLocation != "" && strings.TrimSpace(a.Executable) != "" {
+			exePath = filepath.Join(installLocation, strings.TrimSpace(a.Executable))
+		}
 		apps = append(apps, InstalledApp{
 			Identifier:      identifier,
 			Name:            displayName,
 			Version:         strings.TrimSpace(a.Version),
 			Origin:          "store",
-			InstallLocation: strings.TrimSpace(a.InstallLocation),
+			InstallLocation: installLocation,
+			Sha256:          hashExecutableCached(exePath),
 		})
 	}
 	return apps

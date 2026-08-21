@@ -377,7 +377,8 @@ rather than wiping it.
       "name": "Angry Birds 2",
       "version": "3.17.10.0",
       "origin": "store",
-      "installLocation": "C:\\Program Files\\WindowsApps\\1ED5AEA5.4160926B82DB_3.17.10.0_x64__p2gbknwb5d8r2"
+      "installLocation": "C:\\Program Files\\WindowsApps\\1ED5AEA5.4160926B82DB_3.17.10.0_x64__p2gbknwb5d8r2",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85"
     }
   ]
 }
@@ -386,6 +387,8 @@ rather than wiping it.
 `origin` is optional — `"winget"` for apps detected via `winget list`, `"msi"` for the registry Uninstall-key fallback (only used when winget itself isn't invokable), `"store"` for AppX/UWP packages (PowerShell `Get-AppxPackage`-sourced). Omitted entirely on older agent builds that predate this field; the backend treats a missing `origin` the same as it always has.
 
 `installLocation` is optional and purely informational (shown in SOAR's App detail modal, never used for identifier/matching logic) — always present for AppX/Store packages, present for classic Win32 installs only when the installer wrote one to the registry's `Uninstall` key, and never present for winget-sourced entries.
+
+`sha256` is optional — the lowercase-hex SHA256 of the app's resolved main executable, when this agent could find one (AppX packages: the manifest's own `Executable` attribute; classic Win32 installs: the registry Uninstall key's `DisplayIcon` value, only when it actually points at a `.exe`; never populated for winget-sourced entries, which have no resolvable install path at all). Cached locally (`apphashes.json`, next to `status.json` — see [ARCHITECTURE.md](ARCHITECTURE.md)) so a binary isn't re-hashed every cycle unless it changed. Feeds SOAR's Binary Integrity feature (`backend/docs/settings.md#binary-integrity`): a VirusTotal file-reputation lookup to flag sideloaded/tampered binaries, independent of CVE-based vulnerability matching.
 
 ---
 
