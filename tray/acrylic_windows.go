@@ -88,36 +88,31 @@
 // texture alone looks meaningfully closer to "native" than plain
 // blur-behind did.
 //
-// FIFTH-ATTEMPT DIAGNOSIS (pending real-device test): confirmed on real
-// hardware that ACCENT_ENABLE_ACRYLICBLURBEHIND now looks "perfect" and
-// "crisp" in dark mode, but light mode still shows a fully solid white
-// card — and, critically, lowering cardBackgroundAlphaLight from 0xE6 to
-// 0xCC (a real ~10 percentage point cut) made *no visible difference at
-// all*. That specific result doesn't fit "light mode is blending but just
-// too subtly" — a 10-point alpha cut would show *something*. It fits much
-// better with "this card's own alpha tint was never the bottleneck in
-// light mode; the Acrylic accent policy itself isn't contributing any
-// blur/see-through behind this window when the card is light-themed."
+// FIFTH-ATTEMPT DIAGNOSIS (confirmed on real hardware — DISPROVEN):
+// ACCENT_ENABLE_ACRYLICBLURBEHIND looks "perfect"/"crisp" in dark mode, but
+// light mode showed a fully solid white card with zero trace of the desktop
+// behind it, even after lowering cardBackgroundAlphaLight from 0xE6 to 0xCC.
+// Hypothesized that DWM's blur pipeline might consult
+// DWMWA_USE_IMMERSIVE_DARK_MODE (dropped when the old native-backdrop code
+// was removed) to decide how much it clamps a non-dark-declared window
+// toward opaque, and re-added just that call as an isolated test — real-
+// device re-test came back with literally no change at all ("no trace of
+// the blue Windows wallpaper behind the modal" in light mode, identical to
+// before). Ruled out and reverted; DWMWA_USE_IMMERSIVE_DARK_MODE is not the
+// cause.
 //
-// One concrete difference between the two runs that this file's earlier
-// history dropped without noticing: the previous (now-removed)
-// DwmExtendFrameIntoClientArea/DWMWA_SYSTEMBACKDROP_TYPE code path used to
-// also call DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE) based on
-// cardIsLight, purely so DWM's non-client chrome matched the app's theme.
-// When that whole block was deleted for conflicting with UpdateLayeredWindow
-// (see above), this call went with it — but DWMWA_USE_IMMERSIVE_DARK_MODE
-// itself never asks DWM to own compositing the client area the way
-// DwmExtendFrameIntoClientArea/DWMWA_SYSTEMBACKDROP_TYPE do; it is pure
-// metadata about which theme the app wants DWM-managed chrome to assume.
-// DWM's Accent Policy blur pipeline is documented (by community reverse
-// engineering, not Microsoft) to sometimes consult this same flag as a
-// signal for how it tints/clamps the blur material's default opacity floor
-// for legibility, independently per window — plausible root cause for why
-// an *undeclared* window might default toward a safer, more opaque render
-// specifically outside dark mode. Re-added below as an isolated single
-// variable: it does not touch DwmExtendFrameIntoClientArea or
-// DWMWA_SYSTEMBACKDROP_TYPE, so it should not reintroduce the original
-// opaque-compositing conflict those two caused.
+// Re-examining the two light-mode data points with that ruled out: 0xE6
+// (~90% opaque) to 0xCC (~80% opaque) is only a 10-percentage-point cut off
+// an already-high baseline — small enough that a human eye may simply not
+// register it as "different" even if the underlying blend is technically
+// working, especially against a smooth, low-contrast wallpaper region.
+// Compare dark mode's dramatic, unmistakable result at 0x66 (~40% opaque,
+// i.e. 60% of the pixel showing blurred desktop) — a far bigger cut than
+// either light-mode value tested so far. The simpler explanation was likely
+// right all along: cardBackgroundAlphaLight just hasn't been pushed low
+// enough yet to be visually perceptible, not that light mode's blur
+// contribution is structurally broken. Next test (layeredpaint_windows.go):
+// a much larger single cut, not another small nudge.
 //
 // Every proc is resolved defensively via LazyProc.Find() before Call() —
 // unlike this repo's one existing precedent for a version-gated API
@@ -131,20 +126,10 @@
 package main
 
 import (
-	"syscall"
 	"unsafe"
 )
 
-var (
-	moddwmapi = syscall.NewLazyDLL("dwmapi.dll")
-
-	procSetWindowCompositionAttribute = moduser32.NewProc("SetWindowCompositionAttribute")
-	// procDwmSetWindowAttribute — see this file's FIFTH-ATTEMPT DIAGNOSIS
-	// comment above for why only DWMWA_USE_IMMERSIVE_DARK_MODE is set through
-	// this, never DWMWA_SYSTEMBACKDROP_TYPE (that one conflicts with
-	// UpdateLayeredWindow's own compositing).
-	procDwmSetWindowAttribute = moddwmapi.NewProc("DwmSetWindowAttribute")
-)
+var procSetWindowCompositionAttribute = moduser32.NewProc("SetWindowCompositionAttribute")
 
 const (
 	wcaAccentPolicy = 19
@@ -156,10 +141,6 @@ const (
 	acrylicAccentFlags = 2
 	// acrylicGradientAlpha — see this file's doc comment for why 1, not 0.
 	acrylicGradientAlpha = 1
-
-	// dwmwaUseImmersiveDarkMode — theme-only metadata, not a compositing
-	// takeover; see this file's FIFTH-ATTEMPT DIAGNOSIS comment.
-	dwmwaUseImmersiveDarkMode = 20
 )
 
 // accentPolicy mirrors the undocumented ACCENT_POLICY struct
@@ -202,14 +183,6 @@ func enableBlurBackdrop(hwnd uintptr) {
 	// background tint at the alpha this app chose (cardBackgroundAlphaLight/
 	// Dark, layeredpaint_windows.go); this call's job is only the
 	// blur+noise material underneath it.
-	if procDwmSetWindowAttribute.Find() == nil {
-		darkMode := uint32(1)
-		if cardIsLight {
-			darkMode = 0
-		}
-		procDwmSetWindowAttribute.Call(hwnd, dwmwaUseImmersiveDarkMode, uintptr(unsafe.Pointer(&darkMode)), unsafe.Sizeof(darkMode))
-	}
-
 	if procSetWindowCompositionAttribute.Find() == nil {
 		policy := accentPolicy{
 			accentState:   accentEnableAcrylicBlurBehind,
