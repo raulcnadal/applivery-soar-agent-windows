@@ -81,17 +81,23 @@ import "unsafe"
 // Split into separate light/dark values after real-device testing showed
 // dark mode reading fine at a single 0x66 (~40% opaque) for both, but light
 // mode's text going illegible at the same value. That's not a rendering bug
-// like the banner one below — card.go's cardMutedTextColor doc comment
-// explains colGray600 was deliberately chosen to land at ~7:1 contrast
-// against an *opaque* colWhite background; blending that background down to
-// ~40% against an arbitrary, often-saturated desktop wallpaper throws that
-// calibration out entirely; the effective backdrop text sits on is no
-// longer anything close to white. Dark mode doesn't have the same failure
-// mode: colGray900 blended with almost any wallpaper stays dark enough that
-// colGray400/colWhite text (already chosen for contrast against near-black)
-// keeps working. Light mode instead stays close to opaque — enough to
-// preserve the contrast math its text colors were tuned for — with just
-// enough translucency to read as "glass" rather than fully flat.
+// but a genuine contrast-math constraint — card.go's cardMutedTextColor doc
+// comment explains colGray600 was deliberately chosen to land at ~7:1
+// contrast against an *opaque* colWhite background; blending that
+// background down to ~40% against an arbitrary, often-saturated desktop
+// wallpaper throws that calibration out entirely; the effective backdrop
+// text sits on is no longer anything close to white. Dark mode doesn't have
+// the same failure mode: colGray900 blended with almost any wallpaper stays
+// dark enough that colGray400/colWhite text (already chosen for contrast
+// against near-black) keeps working. Light mode instead has to stay close
+// to opaque to preserve the contrast math its text colors were tuned for —
+// a real-device follow-up test still read this as "basically solid,"
+// though, so there's a genuine, unavoidable tension here between "visibly
+// glassy" and "text stays legible on an arbitrary wallpaper" for a light
+// surface specifically; every other real vibrancy implementation (including
+// macOS's own light-material NSVisualEffectView) leans the same direction
+// for the same reason. Not touching this value again without a live test —
+// see this repo's standing "test one variable at a time" practice.
 const (
 	cardBackgroundAlphaLight = 0xE6 // ~90% opaque
 	cardBackgroundAlphaDark  = 0x66 // ~40% opaque
@@ -219,64 +225,33 @@ func premultiply(c, alpha byte) byte {
 	return byte(uint32(c) * uint32(alpha) / 255)
 }
 
-// forceOpaqueRects lists regions that must always render fully opaque,
-// bypassing the background/foreground color-diff heuristic below entirely.
-// Populated by card.go's paintCardForeground for exactly one case today:
-// the banner bitmap. That raster asset is a fixed brand lockup meant to
-// render exactly as it was designed — hard-edged, fully opaque, not blended
-// into the card's own translucent surface. Diffing it against the
-// background snapshot like every other draw call is actively wrong whenever
-// its own padding happens to share the card's background color exactly —
-// a real, observed bug: the banner logo washed out/went see-through
-// specifically in light mode, because that padding and cardSurfaceColor's
-// light-mode white are (unsurprisingly) the same RGB, so the diff below
-// misclassified it as "background-only" and tinted it down to
-// cardBackgroundAlpha instead of leaving it opaque. Reset at the start of
-// every paintAndPresentCard pass by resetForceOpaqueRects.
-var forceOpaqueRects []winRect
-
-func resetForceOpaqueRects() {
-	forceOpaqueRects = forceOpaqueRects[:0]
-}
-
-func markForceOpaque(r winRect) {
-	forceOpaqueRects = append(forceOpaqueRects, r)
-}
-
-func pixelIsForceOpaque(x, y int32) bool {
-	for _, r := range forceOpaqueRects {
-		if x >= r.left && x < r.right && y >= r.top && y < r.bottom {
-			return true
-		}
-	}
-	return false
-}
-
 // finalizeAlpha is step 4 of this file's doc comment — the single pass that
 // computes every pixel's alpha, run once after both paintCardBackground and
 // paintCardForeground have drawn. `afterBackground` is the raw, still
 // non-premultiplied snapshot taken right after paintCardBackground (step 2);
 // `pixels` is the same buffer now that paintCardForeground (step 3) has
-// drawn on top of it. `width` is the buffer's pixel width, needed to turn a
-// flat byte offset back into (x, y) for the forceOpaqueRects check above.
-// See this file's top doc comment for why deferring premultiplication to
-// this single final pass — rather than premultiplying the background
-// immediately after step 2, before step 3's text anti-aliasing ever sees
-// it — matters.
-func finalizeAlpha(pixels, afterBackground []byte, width int32) {
+// drawn on top of it. See this file's top doc comment for why deferring
+// premultiplication to this single final pass — rather than premultiplying
+// the background immediately after step 2, before step 3's text
+// anti-aliasing ever sees it — matters.
+//
+// A prior version of this file also force-opaqued the banner bitmap's whole
+// rect, bypassing this diff entirely, to fix a reported "logo washed out"
+// issue. Reverted: forcing that whole rect opaque — including its own
+// padding, which is deliberately the same color as the plain card
+// background so it blends seamlessly — created a worse, clearly visible
+// regression instead: a hard rectangular border/seam right at the banner's
+// bounding box in both light and dark mode, wherever that padding (now
+// opaque) met the surrounding background (still translucent) despite being
+// the identical color. The diff below was already doing the right thing for
+// that padding — treating "same color as background" as "should blend like
+// background" is correct, not a bug — so this reverts cleanly to it.
+func finalizeAlpha(pixels, afterBackground []byte) {
 	n := len(pixels)
 	if len(afterBackground) < n {
 		n = len(afterBackground)
 	}
 	for i := 0; i+3 < n; i += 4 {
-		if len(forceOpaqueRects) > 0 {
-			p := int32(i / 4)
-			x, y := p%width, p/width
-			if pixelIsForceOpaque(x, y) {
-				pixels[i+3] = 255
-				continue
-			}
-		}
 		b, g, r := pixels[i], pixels[i+1], pixels[i+2]
 		if b == afterBackground[i] && g == afterBackground[i+1] && r == afterBackground[i+2] {
 			if b == 0 && g == 0 && r == 0 {
@@ -340,14 +315,12 @@ func paintAndPresentCard(hwnd uintptr) {
 	}
 	defer deleteAlphaDIB(hdcMem, hBitmap, oldBitmap)
 
-	resetForceOpaqueRects()
-
 	paintCardBackground(hdcMem)
 	afterBackground := make([]byte, len(pixels))
 	copy(afterBackground, pixels)
 
 	paintCardForeground(hdcMem)
-	finalizeAlpha(pixels, afterBackground, cardWidthPx)
+	finalizeAlpha(pixels, afterBackground)
 
 	presentLayeredCard(hwnd, hdcMem, cardWidthPx, cardHeight)
 }

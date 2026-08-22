@@ -148,12 +148,19 @@ var (
 	procStretchBlt         = modgdi32.NewProc("StretchBlt")
 	procSetStretchBltMode  = modgdi32.NewProc("SetStretchBltMode")
 
-	// Shell_NotifyIconGetRect (shell32.dll, Windows 7+) — documented, public
-	// API for "where is my own tray icon on screen right now," used to open
-	// the card anchored to it (cardPosition below) instead of dead-centered
-	// on the screen, matching the macOS menu bar app's own icon-anchored
-	// panel.
-	procShellNotifyIconGetRect = modshell32.NewProc("Shell_NotifyIconGetRect")
+	// SystemParametersInfoW(SPI_GETWORKAREA) — the documented way to ask
+	// Windows for the primary monitor's work area (screen bounds minus the
+	// taskbar, whichever edge it's docked to), used to pin the card flush to
+	// its bottom-right corner (cardPosition below). Previously this card was
+	// anchored to its own tray icon's rect via Shell_NotifyIconGetRect —
+	// looked right while the icon was visibly pinned, but Windows hides a
+	// newly-installed tray icon in the overflow area by default, and
+	// Shell_NotifyIconGetRect can return success with that overflow button's
+	// rect rather than failing outright in that case, anchoring the card
+	// somewhere unhelpful instead of falling back to a sane default. Per
+	// user feedback, pinning to the work area corner unconditionally is more
+	// predictable either way.
+	procSystemParametersInfoW = moduser32.NewProc("SystemParametersInfoW")
 )
 
 // Color palette — sourced from the applivery-bluesky-design-system repo's
@@ -896,62 +903,45 @@ func registerCardClassOnce() {
 	}
 }
 
-// notifyIconIdentifier mirrors NOTIFYICONIDENTIFIER — identifies this
-// process's own tray icon the same way notifyIconData's hWnd/uID pair
-// already does for Shell_NotifyIconW (main.go), just repackaged into the
-// smaller struct Shell_NotifyIconGetRect specifically expects.
-type notifyIconIdentifier struct {
-	cbSize   uint32
-	hWnd     uintptr
-	uID      uint32
-	guidItem guid
-}
+// spiGetWorkArea is SPI_GETWORKAREA — SystemParametersInfoW's action code
+// for "give me the work area RECT" (the primary monitor's bounds minus
+// whatever the taskbar currently occupies, on whichever edge it's docked
+// to).
+const spiGetWorkArea = 0x0030
 
-// trayIconScreenRect asks Windows for this process's own tray icon's
-// current on-screen rect. Can genuinely fail even on a supported Windows
-// version — e.g. the icon is currently hidden in the notification area's
-// overflow ("^") popup rather than visibly pinned — in which case the
-// caller falls back to a fixed corner position (cardPosition below) rather
-// than erroring or misplacing the card off-screen.
-func trayIconScreenRect() (winRect, bool) {
-	id := notifyIconIdentifier{cbSize: uint32(unsafe.Sizeof(notifyIconIdentifier{})), hWnd: mainHwnd, uID: trayIconID}
+// primaryWorkArea asks Windows for the primary monitor's current work area.
+// Can fail in principle (SystemParametersInfoW returns 0), though in
+// practice this succeeds on every supported Windows version — the caller
+// falls back to the full screen metrics already available to it either way.
+func primaryWorkArea() (winRect, bool) {
 	var r winRect
-	ret, _, _ := procShellNotifyIconGetRect.Call(uintptr(unsafe.Pointer(&id)), uintptr(unsafe.Pointer(&r)))
-	return r, ret == 0 // S_OK
+	ret, _, _ := procSystemParametersInfoW.Call(uintptr(spiGetWorkArea), 0, uintptr(unsafe.Pointer(&r)), 0)
+	return r, ret != 0
 }
 
-// cardPosition anchors the card above and right-aligned to the tray icon —
-// the same "flush against the icon" intent as the macOS menu bar app's own
-// panel (StatusPanel.swift/AppDelegate.openPanel), adapted to
-// Shell_NotifyIconGetRect's icon rect instead of AppKit's status-item
-// button bounds. Assumes the default bottom-edge taskbar (overwhelmingly
-// the common case) — a taskbar pinned to the top/left/right would need the
-// opposite edge, not handled here. Falls back to a fixed bottom-right
-// corner (closer to "near the tray" than the old dead-center placement,
-// even without the exact rect) if the icon rect can't be resolved at all.
+// cardPosition pins the card flush to the bottom-right corner of the
+// primary monitor's work area — right above the taskbar, hard against the
+// right edge, with no gap to the right or below — matching how Windows'
+// own notification toasts are positioned, and independent of where this
+// app's own tray icon happens to be (a prior version anchored to the icon
+// itself; see this file's proc-declaration doc comment above for why that
+// was dropped). Falls back to full screen metrics with a small margin —
+// rather than the exact taskbar-free work area — only if
+// SystemParametersInfoW itself fails, since without the real work area
+// there's no way to know how much of the bottom edge the taskbar occupies.
 func cardPosition(screenW, screenH int32) (int32, int32) {
-	if r, ok := trayIconScreenRect(); ok && r.right > r.left {
-		x := r.right - cardWidthPx
-		y := r.top - cardHeight - s(8)
-		if x < 0 {
-			x = 0
-		}
-		if x+cardWidthPx > screenW {
-			x = screenW - cardWidthPx
-		}
-		if y < 0 {
-			y = 0
-		}
-		return x, y
+	if wa, ok := primaryWorkArea(); ok && wa.right > wa.left && wa.bottom > wa.top {
+		return wa.right - cardWidthPx, wa.bottom - cardHeight
 	}
 	margin := s(16)
 	return screenW - cardWidthPx - margin, screenH - cardHeight - margin
 }
 
 // showCard opens (or, if already open, just re-focuses) the status card,
-// anchored above and right-aligned to the tray icon (cardPosition above).
-// Re-entrancy-guarded: a second click while the card is already open just
-// brings the existing window forward rather than stacking a duplicate.
+// pinned to the bottom-right corner of the screen's work area (cardPosition
+// above). Re-entrancy-guarded: a second click while the card is already
+// open just brings the existing window forward rather than stacking a
+// duplicate.
 func showCard() {
 	if cardHwnd != 0 {
 		procSetForegroundWin.Call(cardHwnd)
@@ -1093,14 +1083,6 @@ func paintCardForeground(hdc uintptr) {
 					procSelectObject.Call(memDC, oldBmp)
 					procDeleteDC.Call(memDC)
 				}
-				// Always fully opaque, regardless of what finalizeAlpha's
-				// background-diff would otherwise conclude — see
-				// layeredpaint_windows.go's forceOpaqueRects doc comment for
-				// the light-mode logo washout this fixes (the banner's own
-				// padding color can legitimately match cardSurfaceColor
-				// exactly, which isn't "this pixel is background", it's just
-				// this raster's real content).
-				markForceOpaque(r)
 			}
 		case drawKindPill:
 			if item.outline {
