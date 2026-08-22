@@ -88,6 +88,37 @@
 // texture alone looks meaningfully closer to "native" than plain
 // blur-behind did.
 //
+// FIFTH-ATTEMPT DIAGNOSIS (pending real-device test): confirmed on real
+// hardware that ACCENT_ENABLE_ACRYLICBLURBEHIND now looks "perfect" and
+// "crisp" in dark mode, but light mode still shows a fully solid white
+// card — and, critically, lowering cardBackgroundAlphaLight from 0xE6 to
+// 0xCC (a real ~10 percentage point cut) made *no visible difference at
+// all*. That specific result doesn't fit "light mode is blending but just
+// too subtly" — a 10-point alpha cut would show *something*. It fits much
+// better with "this card's own alpha tint was never the bottleneck in
+// light mode; the Acrylic accent policy itself isn't contributing any
+// blur/see-through behind this window when the card is light-themed."
+//
+// One concrete difference between the two runs that this file's earlier
+// history dropped without noticing: the previous (now-removed)
+// DwmExtendFrameIntoClientArea/DWMWA_SYSTEMBACKDROP_TYPE code path used to
+// also call DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE) based on
+// cardIsLight, purely so DWM's non-client chrome matched the app's theme.
+// When that whole block was deleted for conflicting with UpdateLayeredWindow
+// (see above), this call went with it — but DWMWA_USE_IMMERSIVE_DARK_MODE
+// itself never asks DWM to own compositing the client area the way
+// DwmExtendFrameIntoClientArea/DWMWA_SYSTEMBACKDROP_TYPE do; it is pure
+// metadata about which theme the app wants DWM-managed chrome to assume.
+// DWM's Accent Policy blur pipeline is documented (by community reverse
+// engineering, not Microsoft) to sometimes consult this same flag as a
+// signal for how it tints/clamps the blur material's default opacity floor
+// for legibility, independently per window — plausible root cause for why
+// an *undeclared* window might default toward a safer, more opaque render
+// specifically outside dark mode. Re-added below as an isolated single
+// variable: it does not touch DwmExtendFrameIntoClientArea or
+// DWMWA_SYSTEMBACKDROP_TYPE, so it should not reintroduce the original
+// opaque-compositing conflict those two caused.
+//
 // Every proc is resolved defensively via LazyProc.Find() before Call() —
 // unlike this repo's one existing precedent for a version-gated API
 // (main.go's procSetProcessDpiAwarenessContext.Call(), which skips that
@@ -100,10 +131,20 @@
 package main
 
 import (
+	"syscall"
 	"unsafe"
 )
 
-var procSetWindowCompositionAttribute = moduser32.NewProc("SetWindowCompositionAttribute")
+var (
+	moddwmapi = syscall.NewLazyDLL("dwmapi.dll")
+
+	procSetWindowCompositionAttribute = moduser32.NewProc("SetWindowCompositionAttribute")
+	// procDwmSetWindowAttribute — see this file's FIFTH-ATTEMPT DIAGNOSIS
+	// comment above for why only DWMWA_USE_IMMERSIVE_DARK_MODE is set through
+	// this, never DWMWA_SYSTEMBACKDROP_TYPE (that one conflicts with
+	// UpdateLayeredWindow's own compositing).
+	procDwmSetWindowAttribute = moddwmapi.NewProc("DwmSetWindowAttribute")
+)
 
 const (
 	wcaAccentPolicy = 19
@@ -115,6 +156,10 @@ const (
 	acrylicAccentFlags = 2
 	// acrylicGradientAlpha — see this file's doc comment for why 1, not 0.
 	acrylicGradientAlpha = 1
+
+	// dwmwaUseImmersiveDarkMode — theme-only metadata, not a compositing
+	// takeover; see this file's FIFTH-ATTEMPT DIAGNOSIS comment.
+	dwmwaUseImmersiveDarkMode = 20
 )
 
 // accentPolicy mirrors the undocumented ACCENT_POLICY struct
@@ -157,6 +202,14 @@ func enableBlurBackdrop(hwnd uintptr) {
 	// background tint at the alpha this app chose (cardBackgroundAlphaLight/
 	// Dark, layeredpaint_windows.go); this call's job is only the
 	// blur+noise material underneath it.
+	if procDwmSetWindowAttribute.Find() == nil {
+		darkMode := uint32(1)
+		if cardIsLight {
+			darkMode = 0
+		}
+		procDwmSetWindowAttribute.Call(hwnd, dwmwaUseImmersiveDarkMode, uintptr(unsafe.Pointer(&darkMode)), unsafe.Sizeof(darkMode))
+	}
+
 	if procSetWindowCompositionAttribute.Find() == nil {
 		policy := accentPolicy{
 			accentState:   accentEnableAcrylicBlurBehind,
