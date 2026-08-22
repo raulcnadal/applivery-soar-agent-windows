@@ -41,14 +41,52 @@
 // blending against the desktop.
 //
 // Removed that native-backdrop path entirely. What remains,
-// SetWindowCompositionAttribute's Accent Policy (ACCENT_ENABLE_BLURBEHIND),
-// is the older Windows 10 1809+ mechanism, and — unlike the native backdrop
-// API — it was purpose-built for exactly this combination (WS_EX_LAYERED +
-// UpdateLayeredWindow): it doesn't ask DWM to own compositing the client
-// area, only to blur the desktop pixels sitting behind the window, which the
-// app's own per-pixel alpha then blends against untouched. This is the same
-// technique long used by pre-Windows-11 raw-Win32 blur-behind
-// implementations for exactly this reason.
+// SetWindowCompositionAttribute's Accent Policy, is the older Windows 10
+// 1809+ mechanism, and — unlike the native backdrop API — it was purpose-
+// built for exactly this combination (WS_EX_LAYERED + UpdateLayeredWindow):
+// it doesn't ask DWM to own compositing the client area, only to blur the
+// desktop pixels sitting behind the window, which the app's own per-pixel
+// alpha then blends against untouched. This is the same technique long used
+// by pre-Windows-11 raw-Win32 blur-behind implementations for exactly this
+// reason.
+//
+// FOURTH-ATTEMPT REFINEMENT (pending real-device test): switched the accent
+// state from ACCENT_ENABLE_BLURBEHIND (3, a plain Gaussian-ish blur) to
+// ACCENT_ENABLE_ACRYLICBLURBEHIND (4) — the actual "Acrylic" material
+// Windows 10/11 used natively in things like the Start Menu and Action
+// Center for years: blur plus a subtle noise texture, closer in spirit to
+// macOS's NSVisualEffectView vibrancy than plain blur-behind. Undocumented
+// by Microsoft (unlike accent state 3, which at least has a stable-enough
+// reputation from a decade of use), but well-established across several
+// actively-maintained real-world tools (TranslucentTB and similar) that
+// rely on the exact same reverse-engineered accentFlags/gradientColor
+// contract used below — reliable in the "widely depended upon" sense, not
+// in the "Microsoft-guaranteed-stable" sense, which is the honest trade-off
+// of using it at all.
+//
+// gradientColor's byte layout is community-documented as 0xAABBGGRR — the
+// same 0x00BBGGRR this repo's own colorref() already produces, just with an
+// alpha byte prepended — so acrylicGradientColor below reuses colorref
+// values directly rather than repacking RGB by hand. Alpha is set to 1
+// (near-zero, not literally 0) deliberately: several reverse-engineering
+// write-ups of this same undocumented API note that GradientColor with
+// alpha=0 causes some Windows builds to skip rendering the Acrylic effect
+// entirely (likely an internal "fully transparent overlay, skip it"
+// shortcut) — 1 is the standard workaround, visually negligible but enough
+// to signal "render it." accentFlags=2 is the other commonly-cited minimum
+// needed for the tint/material to actually render reliably across builds;
+// no border bits are set since the card already draws its own border stroke
+// (paintCardForeground's outer roundRectStroke).
+//
+// This call intentionally does NOT try to make the OS-side gradientColor
+// carry this card's real visible tint — that stays exactly as before,
+// coming from this app's own per-pixel alpha compositing
+// (cardBackgroundAlphaLight/Dark, layeredpaint_windows.go). Stacking two
+// independent tints (the OS accent's and this app's own) would be much
+// harder to reason about and tune than swapping only the one variable this
+// change is actually testing: whether the Acrylic material's blur+noise
+// texture alone looks meaningfully closer to "native" than plain
+// blur-behind did.
 //
 // Every proc is resolved defensively via LazyProc.Find() before Call() —
 // unlike this repo's one existing precedent for a version-gated API
@@ -68,8 +106,15 @@ import (
 var procSetWindowCompositionAttribute = moduser32.NewProc("SetWindowCompositionAttribute")
 
 const (
-	wcaAccentPolicy        = 19
-	accentEnableBlurBehind = 3
+	wcaAccentPolicy = 19
+
+	accentEnableAcrylicBlurBehind = 4
+
+	// acrylicAccentFlags — see this file's doc comment for why 2 (no border
+	// bits set) rather than 0.
+	acrylicAccentFlags = 2
+	// acrylicGradientAlpha — see this file's doc comment for why 1, not 0.
+	acrylicGradientAlpha = 1
 )
 
 // accentPolicy mirrors the undocumented ACCENT_POLICY struct
@@ -89,6 +134,15 @@ type windowCompositionAttributeData struct {
 	sizeOfData uintptr
 }
 
+// acrylicGradientColor packs an RGB value already in this repo's colorref()
+// 0x00BBGGRR layout, plus an alpha byte, into the 0xAABBGGRR uint32
+// SetWindowCompositionAttribute's GradientColor field expects — see this
+// file's doc comment for the byte-layout source and why alpha stays
+// negligible-but-nonzero here rather than carrying the card's real tint.
+func acrylicGradientColor(rgb uintptr, alpha byte) uint32 {
+	return uint32(alpha)<<24 | uint32(rgb&0x00FFFFFF)
+}
+
 // enableBlurBackdrop asks DWM to blur whatever's on the desktop behind hwnd
 // — see this file's doc comment for why that's a separate, safe-by-design
 // concern from this app's own per-pixel alpha content
@@ -96,16 +150,19 @@ type windowCompositionAttributeData struct {
 // independently no-ops on an OS that doesn't support it, and none of it
 // affects whether the card is visible or legible.
 func enableBlurBackdrop(hwnd uintptr) {
-	// Accent Policy blur-behind — see this file's doc comment for why the
-	// native DWMWA_SYSTEMBACKDROP_TYPE path was removed (it fought with
-	// UpdateLayeredWindow's own compositing and won, flattening the card
-	// opaque on tested hardware). No GradientColor tint here (accentFlags=0,
-	// gradientColor=0) — the card's own layered bitmap already carries its
-	// background tint at the alpha this app chose (cardBackgroundAlpha,
-	// layeredpaint_windows.go); all this call needs to contribute is the
-	// blur of the desktop sitting behind it.
+	// Accent Policy Acrylic blur-behind — see this file's doc comment for
+	// why ACCENT_ENABLE_ACRYLICBLURBEHIND over plain ACCENT_ENABLE_BLURBEHIND,
+	// and why GradientColor's alpha is 1 rather than 0 or a real tint value.
+	// The card's own layered bitmap still carries the actual visible
+	// background tint at the alpha this app chose (cardBackgroundAlphaLight/
+	// Dark, layeredpaint_windows.go); this call's job is only the
+	// blur+noise material underneath it.
 	if procSetWindowCompositionAttribute.Find() == nil {
-		policy := accentPolicy{accentState: accentEnableBlurBehind}
+		policy := accentPolicy{
+			accentState:   accentEnableAcrylicBlurBehind,
+			accentFlags:   acrylicAccentFlags,
+			gradientColor: acrylicGradientColor(cardSurfaceColor(cardIsLight), acrylicGradientAlpha),
+		}
 		data := windowCompositionAttributeData{
 			attribute:  wcaAccentPolicy,
 			data:       unsafe.Pointer(&policy),
