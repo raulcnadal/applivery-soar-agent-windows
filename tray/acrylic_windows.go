@@ -1,8 +1,8 @@
 //go:build windows
 // +build windows
 
-// DWM Acrylic/Mica system-backdrop + legacy Accent Policy blur-behind
-// bindings for the tray card window (card.go) — the second attempt at
+// Legacy Accent Policy blur-behind binding for the tray card window
+// (card.go) — the second attempt at
 // matching the macOS menu bar app's translucent NSVisualEffectView panel
 // (see card.go's wsExLayered doc comment for what went wrong the first
 // time: DwmExtendFrameIntoClientArea's classic Aero-Glass chroma-key
@@ -14,20 +14,41 @@
 // self-composited 32bpp premultiplied-alpha bitmap via UpdateLayeredWindow
 // (see layeredpaint_windows.go) — every pixel's translucency is decided by
 // this app, per-pixel, from real alpha values, not by which RGB value GDI
-// happened to leave behind. The calls in this file are a separate,
-// complementary concern: they tell DWM to blur *whatever's on the desktop
-// behind* the window, so the translucent/see-through portions of our own
-// bitmap reveal a blurred backdrop rather than a sharp one. Two paths,
-// tried in order:
+// happened to leave behind. The one call left in this file asks DWM to
+// blur *whatever's on the desktop behind* the window, so the translucent/
+// see-through portions of our own bitmap reveal a blurred backdrop rather
+// than a sharp one.
 //
-//  1. Native Windows 11 22H2+ system backdrop (DWMWA_SYSTEMBACKDROP_TYPE =
-//     DWMSBT_TRANSIENTWINDOW, the "Acrylic" material) — the modern,
-//     documented API.
-//  2. Windows 10 1809+ fallback via the undocumented but widely-relied-on
-//     SetWindowCompositionAttribute Accent Policy (ACCENT_ENABLE_BLURBEHIND)
-//     — no tint color needed here since our own layered bitmap
-//     (cardBackgroundAlpha, layeredpaint_windows.go) already supplies the
-//     tint; this call's only job is the blur.
+// THIRD-ATTEMPT FIX (real-device test on both AMD64 and ARM64 showed the
+// card fully opaque and its background visibly greyer at cardBackgroundAlpha
+// = 0x66 than at 0xCC — i.e. lowering alpha made the *flat, unblended*
+// premultiplied color darker with zero corresponding increase in see-through
+// desktop, which only makes sense if DWM was never actually alpha-blending
+// this window against the desktop at all): this file previously ALSO called
+// DwmExtendFrameIntoClientArea (all-negative margins, the "sheet of glass"
+// trick) followed by DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE) to
+// request the native Windows 11 22H2+ Acrylic material. Both of those are
+// designed for an ordinary DWM-composited window where DWM itself owns
+// painting a backdrop behind content the app draws via normal
+// WM_PAINT/BitBlt — they hand DWM a second, competing compositing pipeline
+// for the exact same client area a WS_EX_LAYERED window's UpdateLayeredWindow
+// call already owns outright. On the tested hardware DWM's frame-extension
+// path won that fight: it composited our bitmap as an *opaque* surface
+// (ignoring the alpha channel UpdateLayeredWindow supplied), which explains
+// both symptoms — no visible transparency, and a background that gets
+// visibly grayer/darker as cardBackgroundAlpha drops, since a lower alpha
+// only changes the premultiplied RGB (darker) while contributing nothing to
+// blending against the desktop.
+//
+// Removed that native-backdrop path entirely. What remains,
+// SetWindowCompositionAttribute's Accent Policy (ACCENT_ENABLE_BLURBEHIND),
+// is the older Windows 10 1809+ mechanism, and — unlike the native backdrop
+// API — it was purpose-built for exactly this combination (WS_EX_LAYERED +
+// UpdateLayeredWindow): it doesn't ask DWM to own compositing the client
+// area, only to blur the desktop pixels sitting behind the window, which the
+// app's own per-pixel alpha then blends against untouched. This is the same
+// technique long used by pre-Windows-11 raw-Win32 blur-behind
+// implementations for exactly this reason.
 //
 // Every proc is resolved defensively via LazyProc.Find() before Call() —
 // unlike this repo's one existing precedent for a version-gated API
@@ -41,34 +62,15 @@
 package main
 
 import (
-	"syscall"
 	"unsafe"
 )
 
-var (
-	moddwmapi = syscall.NewLazyDLL("dwmapi.dll")
-
-	procDwmSetWindowAttribute         = moddwmapi.NewProc("DwmSetWindowAttribute")
-	procDwmExtendFrameIntoClientArea  = moddwmapi.NewProc("DwmExtendFrameIntoClientArea")
-	procSetWindowCompositionAttribute = moduser32.NewProc("SetWindowCompositionAttribute")
-)
+var procSetWindowCompositionAttribute = moduser32.NewProc("SetWindowCompositionAttribute")
 
 const (
-	dwmwaUseImmersiveDarkMode = 20
-	dwmwaSystemBackdropType   = 38
-
-	dwmsbtTransientWindow = 3 // "Acrylic" material
-
 	wcaAccentPolicy        = 19
 	accentEnableBlurBehind = 3
 )
-
-// dwmMargins mirrors the Win32 MARGINS struct (four LONGs, left/right/top/
-// bottom in that order) — DwmExtendFrameIntoClientArea's only parameter
-// besides the window handle.
-type dwmMargins struct {
-	left, right, top, bottom int32
-}
 
 // accentPolicy mirrors the undocumented ACCENT_POLICY struct
 // SetWindowCompositionAttribute expects when Attribute == WCA_ACCENT_POLICY.
@@ -94,37 +96,14 @@ type windowCompositionAttributeData struct {
 // independently no-ops on an OS that doesn't support it, and none of it
 // affects whether the card is visible or legible.
 func enableBlurBackdrop(hwnd uintptr) {
-	// DwmExtendFrameIntoClientArea with all-negative margins is the documented
-	// prerequisite for DWMWA_SYSTEMBACKDROP_TYPE to actually paint into the
-	// *client* area rather than just a non-client frame this borderless
-	// WS_POPUP doesn't have — a step several public "Mica/Acrylic in raw
-	// Win32" write-ups call out as the easy-to-miss reason
-	// DWMWA_SYSTEMBACKDROP_TYPE alone silently does nothing.
-	if procDwmExtendFrameIntoClientArea.Find() == nil {
-		m := dwmMargins{-1, -1, -1, -1}
-		procDwmExtendFrameIntoClientArea.Call(hwnd, uintptr(unsafe.Pointer(&m)))
-	}
-
-	if procDwmSetWindowAttribute.Find() == nil {
-		darkMode := uint32(1)
-		if cardIsLight {
-			darkMode = 0
-		}
-		procDwmSetWindowAttribute.Call(hwnd, uintptr(dwmwaUseImmersiveDarkMode), uintptr(unsafe.Pointer(&darkMode)), unsafe.Sizeof(darkMode))
-
-		backdrop := uint32(dwmsbtTransientWindow)
-		ret, _, _ := procDwmSetWindowAttribute.Call(hwnd, uintptr(dwmwaSystemBackdropType), uintptr(unsafe.Pointer(&backdrop)), unsafe.Sizeof(backdrop))
-		if ret == 0 { // S_OK — native backdrop accepted, skip the legacy fallback below
-			return
-		}
-	}
-
-	// Windows 10 1809–21H2 fallback: no native system backdrop type, so ask
-	// for the older Accent Policy blur-behind instead. No GradientColor tint
-	// here (accentFlags=0, gradientColor=0) — the card's own layered bitmap
-	// already carries its background tint at the alpha this app chose
-	// (cardBackgroundAlpha, layeredpaint_windows.go); all this call needs to
-	// contribute is the blur itself.
+	// Accent Policy blur-behind — see this file's doc comment for why the
+	// native DWMWA_SYSTEMBACKDROP_TYPE path was removed (it fought with
+	// UpdateLayeredWindow's own compositing and won, flattening the card
+	// opaque on tested hardware). No GradientColor tint here (accentFlags=0,
+	// gradientColor=0) — the card's own layered bitmap already carries its
+	// background tint at the alpha this app chose (cardBackgroundAlpha,
+	// layeredpaint_windows.go); all this call needs to contribute is the
+	// blur of the desktop sitting behind it.
 	if procSetWindowCompositionAttribute.Find() == nil {
 		policy := accentPolicy{accentState: accentEnableBlurBehind}
 		data := windowCompositionAttributeData{
