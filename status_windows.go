@@ -73,6 +73,41 @@ func fetchAgentStatus(baseURL *url.URL, config Config, serialNumber, platform st
 	return &result, nil
 }
 
+// fetchAgentStatusWithRetry wraps fetchAgentStatus with a couple of quick,
+// short-backoff retries within the same report cycle, rather than letting a
+// single failure sit in the tray's status cache as "Unavailable" until the
+// next full ticker interval — which, per clampInterval above, defaults to
+// 1 hour and is admin-configurable arbitrarily higher. That gap is the
+// actual explanation for a real-device report ("agent-status keeps showing
+// Unavailable after an upgrade until I manually restart the service or
+// reboot, which always works"): both of those actions short-circuit straight
+// to runAgentLoop's initial gatherAndReport() call, i.e. an immediate retry
+// — nothing about the service itself is stuck or failing to restart cleanly,
+// it's just correctly waiting out its normal interval before trying again,
+// which reads as "broken" when that interval is long and the one attempt
+// that happened to run (e.g. right as the upgrade's brief network/backend
+// hiccup was still settling) failed. Retrying a few times a short distance
+// apart, still within this one background cycle, absorbs exactly that kind
+// of transient failure without needing to know or fix its root cause, and
+// without the admin ever noticing. If all attempts fail, the outcome is
+// identical to before: Available=false with the same reason string.
+func fetchAgentStatusWithRetry(baseURL *url.URL, config Config, serialNumber, platform string) (*agentstatus.AgentStatusResponse, error) {
+	delays := []time.Duration{5 * time.Second, 15 * time.Second}
+	status, err := fetchAgentStatus(baseURL, config, serialNumber, platform)
+	if err == nil {
+		return status, nil
+	}
+	for i, d := range delays {
+		log.Printf("agent-status fetch failed (attempt %d/%d): %v — retrying in %s.", i+1, len(delays)+1, err, d)
+		time.Sleep(d)
+		status, err = fetchAgentStatus(baseURL, config, serialNumber, platform)
+		if err == nil {
+			return status, nil
+		}
+	}
+	return nil, err
+}
+
 // readCurrentStatusCache reads back whatever this same process (or a prior
 // run of it) last wrote to status.json via writeStatusCache — used by
 // forceEvaluateCompliance to patch just the Compliance section in place

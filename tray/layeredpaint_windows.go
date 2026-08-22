@@ -35,9 +35,11 @@
 //  4. finalizeAlpha does one single pass comparing the now-fully-painted
 //     buffer against the step-2 snapshot, per pixel: identical RGB and
 //     still-zero means genuinely untouched (stays alpha 0 — the four true
-//     rounded corners RoundRect's fill never reaches, which is also what
-//     makes SetWindowRgn's separate rounded-corner clip in card.go
-//     redundant-but-harmless belt-and-suspenders rather than load-bearing);
+//     rounded corners RoundRect's fill never reaches, which is also why
+//     card.go's old separate SetWindowRgn rounded-corner clip was removed:
+//     it turned out not to be harmless belt-and-suspenders after all — see
+//     card.go's showCard doc comment for the black-border artifact it
+//     caused once blur-behind was actually working);
 //     identical RGB but non-zero means background-only, so it gets
 //     premultiplied by cardBackgroundAlpha *now*, for the first time, and
 //     tagged with that alpha; and any difference at all from the
@@ -62,21 +64,45 @@ package main
 
 import "unsafe"
 
-// cardBackgroundAlpha is the tint opacity applied to the card's own
-// translucent background fill (0-255) — the RGB itself still comes from
+// cardBackgroundAlphaLight/cardBackgroundAlphaDark are the tint opacity
+// applied to the card's own translucent background fill (0-255) — the RGB
+// itself still comes from
 // cardSurfaceColor (colWhite/colGray900), just not fully opaque, so the DWM
 // blur set up in acrylic_windows.go shows through it. Lowered from the
 // initial 0xCC (~80%) to 0x66 (~40%) after real-device testing (AMD64 and
 // ARM64, both foreground, no other window in front) showed no visible
 // transparency at all on the card — at 80% opaque, whatever sliver of
 // blur/desktop was showing through may simply have been too faint to read
-// as "translucent" rather than genuinely absent. Still a starting point for
-// the next test pass, not a final tuned value — see acrylic_windows.go's
-// doc comment if this test also shows no visible effect, since that would
-// point at the DWM backdrop calls themselves (or SetWindowRgn's rounded-
-// corner clip interacting with UpdateLayeredWindow's per-pixel alpha)
-// rather than this constant.
-const cardBackgroundAlpha = 0x66
+// as "translucent" rather than genuinely absent. Confirmed actually working
+// on real hardware after acrylic_windows.go's DWM native-backdrop removal
+// and card.go's SetWindowRgn removal (see both files' doc comments) — blur/
+// translucency is now visibly present.
+//
+// Split into separate light/dark values after real-device testing showed
+// dark mode reading fine at a single 0x66 (~40% opaque) for both, but light
+// mode's text going illegible at the same value. That's not a rendering bug
+// like the banner one below — card.go's cardMutedTextColor doc comment
+// explains colGray600 was deliberately chosen to land at ~7:1 contrast
+// against an *opaque* colWhite background; blending that background down to
+// ~40% against an arbitrary, often-saturated desktop wallpaper throws that
+// calibration out entirely; the effective backdrop text sits on is no
+// longer anything close to white. Dark mode doesn't have the same failure
+// mode: colGray900 blended with almost any wallpaper stays dark enough that
+// colGray400/colWhite text (already chosen for contrast against near-black)
+// keeps working. Light mode instead stays close to opaque — enough to
+// preserve the contrast math its text colors were tuned for — with just
+// enough translucency to read as "glass" rather than fully flat.
+const (
+	cardBackgroundAlphaLight = 0xE6 // ~90% opaque
+	cardBackgroundAlphaDark  = 0x66 // ~40% opaque
+)
+
+func currentCardBackgroundAlpha() byte {
+	if cardIsLight {
+		return cardBackgroundAlphaLight
+	}
+	return cardBackgroundAlphaDark
+}
 
 var (
 	procCreateDIBSection    = modgdi32.NewProc("CreateDIBSection")
@@ -193,32 +219,78 @@ func premultiply(c, alpha byte) byte {
 	return byte(uint32(c) * uint32(alpha) / 255)
 }
 
+// forceOpaqueRects lists regions that must always render fully opaque,
+// bypassing the background/foreground color-diff heuristic below entirely.
+// Populated by card.go's paintCardForeground for exactly one case today:
+// the banner bitmap. That raster asset is a fixed brand lockup meant to
+// render exactly as it was designed — hard-edged, fully opaque, not blended
+// into the card's own translucent surface. Diffing it against the
+// background snapshot like every other draw call is actively wrong whenever
+// its own padding happens to share the card's background color exactly —
+// a real, observed bug: the banner logo washed out/went see-through
+// specifically in light mode, because that padding and cardSurfaceColor's
+// light-mode white are (unsurprisingly) the same RGB, so the diff below
+// misclassified it as "background-only" and tinted it down to
+// cardBackgroundAlpha instead of leaving it opaque. Reset at the start of
+// every paintAndPresentCard pass by resetForceOpaqueRects.
+var forceOpaqueRects []winRect
+
+func resetForceOpaqueRects() {
+	forceOpaqueRects = forceOpaqueRects[:0]
+}
+
+func markForceOpaque(r winRect) {
+	forceOpaqueRects = append(forceOpaqueRects, r)
+}
+
+func pixelIsForceOpaque(x, y int32) bool {
+	for _, r := range forceOpaqueRects {
+		if x >= r.left && x < r.right && y >= r.top && y < r.bottom {
+			return true
+		}
+	}
+	return false
+}
+
 // finalizeAlpha is step 4 of this file's doc comment — the single pass that
 // computes every pixel's alpha, run once after both paintCardBackground and
 // paintCardForeground have drawn. `afterBackground` is the raw, still
 // non-premultiplied snapshot taken right after paintCardBackground (step 2);
 // `pixels` is the same buffer now that paintCardForeground (step 3) has
-// drawn on top of it. See this file's top doc comment for why deferring
-// premultiplication to this single final pass — rather than premultiplying
-// the background immediately after step 2, before step 3's text
-// anti-aliasing ever sees it — matters.
-func finalizeAlpha(pixels, afterBackground []byte) {
+// drawn on top of it. `width` is the buffer's pixel width, needed to turn a
+// flat byte offset back into (x, y) for the forceOpaqueRects check above.
+// See this file's top doc comment for why deferring premultiplication to
+// this single final pass — rather than premultiplying the background
+// immediately after step 2, before step 3's text anti-aliasing ever sees
+// it — matters.
+func finalizeAlpha(pixels, afterBackground []byte, width int32) {
 	n := len(pixels)
 	if len(afterBackground) < n {
 		n = len(afterBackground)
 	}
 	for i := 0; i+3 < n; i += 4 {
+		if len(forceOpaqueRects) > 0 {
+			p := int32(i / 4)
+			x, y := p%width, p/width
+			if pixelIsForceOpaque(x, y) {
+				pixels[i+3] = 255
+				continue
+			}
+		}
 		b, g, r := pixels[i], pixels[i+1], pixels[i+2]
 		if b == afterBackground[i] && g == afterBackground[i+1] && r == afterBackground[i+2] {
 			if b == 0 && g == 0 && r == 0 {
 				continue // never touched by either pass — fully transparent
 			}
-			// Background-only: tint to cardBackgroundAlpha now, for the
-			// first time (see doc comment above for why not sooner).
-			pixels[i] = premultiply(b, cardBackgroundAlpha)
-			pixels[i+1] = premultiply(g, cardBackgroundAlpha)
-			pixels[i+2] = premultiply(r, cardBackgroundAlpha)
-			pixels[i+3] = cardBackgroundAlpha
+			// Background-only: tint to the current theme's background alpha
+			// now, for the first time (see doc comment above for why not
+			// sooner, and currentCardBackgroundAlpha's own doc comment for
+			// why light and dark mode use different values here).
+			alpha := currentCardBackgroundAlpha()
+			pixels[i] = premultiply(b, alpha)
+			pixels[i+1] = premultiply(g, alpha)
+			pixels[i+2] = premultiply(r, alpha)
+			pixels[i+3] = alpha
 			continue
 		}
 		// paintCardForeground put real ink here — however slightly it
@@ -268,12 +340,14 @@ func paintAndPresentCard(hwnd uintptr) {
 	}
 	defer deleteAlphaDIB(hdcMem, hBitmap, oldBitmap)
 
+	resetForceOpaqueRects()
+
 	paintCardBackground(hdcMem)
 	afterBackground := make([]byte, len(pixels))
 	copy(afterBackground, pixels)
 
 	paintCardForeground(hdcMem)
-	finalizeAlpha(pixels, afterBackground)
+	finalizeAlpha(pixels, afterBackground, cardWidthPx)
 
 	presentLayeredCard(hwnd, hdcMem, cardWidthPx, cardHeight)
 }

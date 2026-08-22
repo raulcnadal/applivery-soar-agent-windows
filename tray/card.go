@@ -1015,12 +1015,21 @@ func showCard() {
 	}
 	cardHwnd = hwnd
 
-	radius := s(cardCornerRadius)
-	rgn, _, _ := procCreateRoundRectRgn.Call(0, 0, uintptr(cardWidthPx), uintptr(cardHeight), uintptr(radius), uintptr(radius))
-	if rgn != 0 {
-		procSetWindowRgn.Call(hwnd, rgn, 1)
-	}
-
+	// No SetWindowRgn here (there used to be one, via CreateRoundRectRgn) —
+	// removed after real-device testing showed a black border/halo around
+	// the card, most visible against light/high-contrast backgrounds (barely
+	// noticeable against a dark wallpaper, which is why it went unnoticed
+	// until blur-behind actually started working). layeredpaint_windows.go's
+	// finalizeAlpha already leaves the four true corners at alpha 0 — RoundRect
+	// fill never reaches them — so the region clip was doing nothing but
+	// adding a second, hard-edged rounded-rect shape on top of the first,
+	// smoothly-antialiased one from the alpha channel. Where those two
+	// slightly different roundings didn't line up pixel-for-pixel, DWM's
+	// blur-behind sampling had a sliver of boundary it couldn't resolve
+	// against either shape cleanly, rendering it as solid black instead of
+	// blending — exactly the artifact reported. The alpha channel alone is
+	// sufficient to shape the window; this call was never load-bearing.
+	//
 	// Best-effort — see acrylic_windows.go's doc comment. Whether or not DWM
 	// agrees to blur anything behind the window, the card itself is always
 	// fully legible: layeredpaint_windows.go's compositing produces a real
@@ -1084,6 +1093,14 @@ func paintCardForeground(hdc uintptr) {
 					procSelectObject.Call(memDC, oldBmp)
 					procDeleteDC.Call(memDC)
 				}
+				// Always fully opaque, regardless of what finalizeAlpha's
+				// background-diff would otherwise conclude — see
+				// layeredpaint_windows.go's forceOpaqueRects doc comment for
+				// the light-mode logo washout this fixes (the banner's own
+				// padding color can legitimately match cardSurfaceColor
+				// exactly, which isn't "this pixel is background", it's just
+				// this raster's real content).
+				markForceOpaque(r)
 			}
 		case drawKindPill:
 			if item.outline {

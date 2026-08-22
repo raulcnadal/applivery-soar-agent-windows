@@ -299,7 +299,7 @@ func updateStatusCache(baseURL *url.URL, config Config, serialNumber string, att
 		cache.FirewallEnabled = &v
 	}
 
-	status, err := fetchAgentStatus(baseURL, config, serialNumber, "windows")
+	status, err := fetchAgentStatusWithRetry(baseURL, config, serialNumber, "windows")
 	if err != nil {
 		log.Printf("Could not fetch compliance status for the tray icon: %v", err)
 		cache.Compliance = agentstatus.AgentStatusCompliance{Available: false, Reason: "Could not reach the SOAR backend for compliance status."}
