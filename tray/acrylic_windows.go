@@ -133,26 +133,34 @@
 // own gradientColor.alpha or cardBackgroundAlphaLight, since neither of
 // those touches TintColor itself.
 //
-// Testing that directly: enableBlurBackdrop below now always passes
-// colGray900 as the accent policy's gradientColor RGB, regardless of
-// cardIsLight, rather than following cardSurfaceColor. This does not change
-// what the card actually looks like — that still comes entirely from this
-// app's own per-pixel alpha compositing at cardSurfaceColor(cardIsLight)
-// (layeredpaint_windows.go), and gradientColor.alpha stays at the same
-// deliberately negligible 1 either way — it only changes which color hint
-// DWM's Acrylic material itself is blending against internally. If light
-// mode suddenly shows real transparency with this change, that confirms the
-// luminosity-blend theory and this becomes the permanent approach (decouple
-// the OS-side tint hint from the card's own visible color entirely, always
-// favoring whichever RGB is proven to keep the automatic opacity low). If
-// light mode is STILL fully solid even with a proven-transparent RGB behind
-// it, that rules this out too and points at something outside this file
-// altogether — e.g. Windows silently suppressing Acrylic specifically for
-// light-themed sessions on this test VM's virtual GPU/compositor path
-// (worth asking the user to check Settings > Personalization > Colors >
-// Transparency effects while actually in light mode, since dark mode being
-// confirmed working doesn't fully rule out a theme-specific compositor
-// quirk on virtualized hardware).
+// Tested that directly by making enableBlurBackdrop always pass colGray900
+// as the accent policy's gradientColor RGB, regardless of cardIsLight —
+// CONFIRMED on real hardware: light mode showed real, visible transparency
+// for the first time (blurred wallpaper genuinely showing through). The
+// luminosity-blend theory was right. But colGray900 introduced a new,
+// expected side effect: the light card now reads with a visible gray/blue
+// cast (colGray900's own near-black hue bleeding into the composited
+// result) rather than a clean light/white "glass," and — the more serious
+// problem — colGray600 body text (calibrated for ~7:1 contrast against an
+// *opaque white* background, see layeredpaint_windows.go's doc comment)
+// became hard to read against that grayer, muddier translucent backdrop.
+//
+// SEVENTH-ATTEMPT REFINEMENT (pending real-device test): colGray900 was
+// only ever meant as a diagnostic proof-of-concept RGB (dark mode's own
+// proven-transparent value, reused purely to test the theory), not a
+// considered choice for what light mode should actually look like. Now that
+// the mechanism is confirmed controllable, this bisects toward a lighter
+// neutral gray — acrylicGradientColorLight, colorref(190, 195, 205) — far
+// enough from pure white (0xFFFFFF) to hopefully still avoid the luminosity
+// clamp that made 0xE6/0xCC/0x99 all read fully solid, but far lighter than
+// colGray900's near-black to reduce the visible cast and give colGray600
+// text a better chance at staying legible. Dark mode's gradientColor is
+// untouched (still colGray900, still confirmed working). If text is still
+// hard to read at this value, cardBackgroundAlphaLight (currently 0x99,
+// layeredpaint_windows.go) is the next lever — raising it back up trades
+// some visible transparency for more opaque, higher-contrast text, now that
+// transparency itself is a known-working, tunable knob rather than an
+// on/off switch.
 //
 // Every proc is resolved defensively via LazyProc.Find() before Call() —
 // unlike this repo's one existing precedent for a version-gated API
@@ -182,6 +190,12 @@ const (
 	// acrylicGradientAlpha — see this file's doc comment for why 1, not 0.
 	acrylicGradientAlpha = 1
 )
+
+// acrylicGradientColorLight — the light-theme accent policy's OS-side tint
+// hint, distinct from cardSurfaceColor's real colWhite; see this file's
+// SEVENTH-ATTEMPT REFINEMENT doc comment for why a bisected light-neutral
+// gray, not colGray900 or pure white.
+var acrylicGradientColorLight = colorref(190, 195, 205)
 
 // accentPolicy mirrors the undocumented ACCENT_POLICY struct
 // SetWindowCompositionAttribute expects when Attribute == WCA_ACCENT_POLICY.
@@ -225,20 +239,23 @@ func enableBlurBackdrop(hwnd uintptr) {
 	// blur+noise material underneath it.
 	if procSetWindowCompositionAttribute.Find() == nil {
 		// gradientColor's RGB deliberately does NOT follow
-		// cardSurfaceColor(cardIsLight) here — see this file's SIXTH-ATTEMPT
-		// DIAGNOSIS comment above. Always hinting the OS-side material with
-		// colGray900 (the value proven to render genuinely transparent in
-		// dark mode) rather than the theme's real surface color tests
-		// whether the light card's total insensitivity to three different
-		// cardBackgroundAlphaLight values was actually caused by a
-		// near-white gradientColor tripping the Acrylic material's own
-		// automatic luminosity-opacity boost. This does not change the
-		// card's own visible color — that's still decided entirely by this
-		// app's per-pixel alpha compositing (layeredpaint_windows.go).
+		// cardSurfaceColor(cardIsLight) here — see this file's SIXTH/
+		// SEVENTH-ATTEMPT doc comments above. Dark mode keeps colGray900
+		// (already proven to render correctly); light mode uses a bisected
+		// light-neutral gray, not the card's own real colWhite, to avoid
+		// the Acrylic material's opacity clamp on near-white tints while
+		// minimizing the visible cast that colGray900 caused when it was
+		// tried in light mode as a diagnostic. Either way, this never
+		// changes the card's own visible color — that's decided entirely by
+		// this app's per-pixel alpha compositing (layeredpaint_windows.go).
+		gradientRGB := colGray900
+		if cardIsLight {
+			gradientRGB = acrylicGradientColorLight
+		}
 		policy := accentPolicy{
 			accentState:   accentEnableAcrylicBlurBehind,
 			accentFlags:   acrylicAccentFlags,
-			gradientColor: acrylicGradientColor(colGray900, acrylicGradientAlpha),
+			gradientColor: acrylicGradientColor(gradientRGB, acrylicGradientAlpha),
 		}
 		data := windowCompositionAttributeData{
 			attribute:  wcaAccentPolicy,
