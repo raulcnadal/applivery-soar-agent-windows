@@ -101,18 +101,58 @@
 // before). Ruled out and reverted; DWMWA_USE_IMMERSIVE_DARK_MODE is not the
 // cause.
 //
-// Re-examining the two light-mode data points with that ruled out: 0xE6
-// (~90% opaque) to 0xCC (~80% opaque) is only a 10-percentage-point cut off
-// an already-high baseline — small enough that a human eye may simply not
-// register it as "different" even if the underlying blend is technically
-// working, especially against a smooth, low-contrast wallpaper region.
-// Compare dark mode's dramatic, unmistakable result at 0x66 (~40% opaque,
-// i.e. 60% of the pixel showing blurred desktop) — a far bigger cut than
-// either light-mode value tested so far. The simpler explanation was likely
-// right all along: cardBackgroundAlphaLight just hasn't been pushed low
-// enough yet to be visually perceptible, not that light mode's blur
-// contribution is structurally broken. Next test (layeredpaint_windows.go):
-// a much larger single cut, not another small nudge.
+// SIXTH-ATTEMPT DIAGNOSIS (pending real-device test): three consecutive
+// real-device rounds tried cardBackgroundAlphaLight at 0xE6, then 0xCC, then
+// 0x99 (~90% -> ~80% -> ~60% opaque, a large, unambiguous cut by the third
+// round) — every one came back "no difference," fully solid, zero trace of
+// the desktop. Total insensitivity to three very different values of *our
+// own* alpha constant means our alpha was never the actual variable in
+// control here; something upstream is clamping the light card toward opaque
+// regardless of what this app asks for.
+//
+// The one thing never varied across any of those rounds: the accent
+// policy's own gradientColor RGB, which follows cardSurfaceColor(cardIsLight)
+// — pure white (0xFFFFFF) for light, near-black colGray900 for dark — the
+// same theme split used for this app's own per-pixel tint. Microsoft's
+// documented (for XAML's AcrylicBrush, which shares this same underlying
+// Fluent compositor material under the hood, just exposed through a
+// different, newer, documented API surface) Acrylic algorithm blends the
+// blurred backdrop against TintColor, then applies a second "luminosity
+// blend" pass whose opacity is computed *from how light or dark TintColor
+// is* specifically so a light-tinted surface still reads as unambiguously
+// light regardless of what's behind it, and a dark-tinted one still reads
+// as dark — which means a near-white tint color can legitimately get a much
+// higher effective opacity applied automatically than a near-black one,
+// independent of the small gradientColor.alpha this file requests. If the
+// older, undocumented SetWindowCompositionAttribute entry point shares that
+// same internal material (plausible; it's the same "Acrylic" the OS has
+// used since Windows 10, just via an older Win32 door into it), that would
+// explain every observed result: dark mode's near-black tint keeps a low
+// automatic luminosity opacity and reads as dramatically transparent, while
+// light mode's pure-white tint gets clamped toward opaque regardless of our
+// own gradientColor.alpha or cardBackgroundAlphaLight, since neither of
+// those touches TintColor itself.
+//
+// Testing that directly: enableBlurBackdrop below now always passes
+// colGray900 as the accent policy's gradientColor RGB, regardless of
+// cardIsLight, rather than following cardSurfaceColor. This does not change
+// what the card actually looks like — that still comes entirely from this
+// app's own per-pixel alpha compositing at cardSurfaceColor(cardIsLight)
+// (layeredpaint_windows.go), and gradientColor.alpha stays at the same
+// deliberately negligible 1 either way — it only changes which color hint
+// DWM's Acrylic material itself is blending against internally. If light
+// mode suddenly shows real transparency with this change, that confirms the
+// luminosity-blend theory and this becomes the permanent approach (decouple
+// the OS-side tint hint from the card's own visible color entirely, always
+// favoring whichever RGB is proven to keep the automatic opacity low). If
+// light mode is STILL fully solid even with a proven-transparent RGB behind
+// it, that rules this out too and points at something outside this file
+// altogether — e.g. Windows silently suppressing Acrylic specifically for
+// light-themed sessions on this test VM's virtual GPU/compositor path
+// (worth asking the user to check Settings > Personalization > Colors >
+// Transparency effects while actually in light mode, since dark mode being
+// confirmed working doesn't fully rule out a theme-specific compositor
+// quirk on virtualized hardware).
 //
 // Every proc is resolved defensively via LazyProc.Find() before Call() —
 // unlike this repo's one existing precedent for a version-gated API
@@ -184,10 +224,21 @@ func enableBlurBackdrop(hwnd uintptr) {
 	// Dark, layeredpaint_windows.go); this call's job is only the
 	// blur+noise material underneath it.
 	if procSetWindowCompositionAttribute.Find() == nil {
+		// gradientColor's RGB deliberately does NOT follow
+		// cardSurfaceColor(cardIsLight) here — see this file's SIXTH-ATTEMPT
+		// DIAGNOSIS comment above. Always hinting the OS-side material with
+		// colGray900 (the value proven to render genuinely transparent in
+		// dark mode) rather than the theme's real surface color tests
+		// whether the light card's total insensitivity to three different
+		// cardBackgroundAlphaLight values was actually caused by a
+		// near-white gradientColor tripping the Acrylic material's own
+		// automatic luminosity-opacity boost. This does not change the
+		// card's own visible color — that's still decided entirely by this
+		// app's per-pixel alpha compositing (layeredpaint_windows.go).
 		policy := accentPolicy{
 			accentState:   accentEnableAcrylicBlurBehind,
 			accentFlags:   acrylicAccentFlags,
-			gradientColor: acrylicGradientColor(cardSurfaceColor(cardIsLight), acrylicGradientAlpha),
+			gradientColor: acrylicGradientColor(colGray900, acrylicGradientAlpha),
 		}
 		data := windowCompositionAttributeData{
 			attribute:  wcaAccentPolicy,
