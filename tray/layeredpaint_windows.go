@@ -110,9 +110,20 @@ import "unsafe"
 //     step down, still comfortably more opaque than dark mode's 0x66 for
 //     the colGray600 contrast-floor reason above. If text legibility
 //     regresses at this value, step back up toward 0x99.
+// cardBackgroundAlphaDark: confirmed "perfect"/"crisp" at 0x66 (~40% opaque)
+// once the Acrylic material itself was working correctly. After light
+// mode's own transparency was fixed and pushed a bit further per user
+// request (0x99 -> 0x80 above), the user asked for dark mode to get a
+// similar nudge — it "looks good but it's less transparent as well" next to
+// the newly-more-transparent light mode. Dropped one step, 0x66 -> 0x55
+// (~33% opaque), the same kind of single-variable cut as light mode's,
+// rather than matching the exact percentage-point drop — dark mode's
+// colGray400/colWhite text has more contrast headroom against a near-black
+// background than light mode's colGray600 does against white, so there's
+// less of a legibility cliff to worry about here.
 const (
 	cardBackgroundAlphaLight = 0x80 // ~50% opaque
-	cardBackgroundAlphaDark  = 0x66 // ~40% opaque
+	cardBackgroundAlphaDark  = 0x55 // ~33% opaque
 )
 
 func currentCardBackgroundAlpha() byte {
