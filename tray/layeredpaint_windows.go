@@ -110,20 +110,21 @@ import "unsafe"
 //     step down, still comfortably more opaque than dark mode's 0x66 for
 //     the colGray600 contrast-floor reason above. If text legibility
 //     regresses at this value, step back up toward 0x99.
-// cardBackgroundAlphaDark: confirmed "perfect"/"crisp" at 0x66 (~40% opaque)
-// once the Acrylic material itself was working correctly. After light
-// mode's own transparency was fixed and pushed a bit further per user
-// request (0x99 -> 0x80 above), the user asked for dark mode to get a
-// similar nudge — it "looks good but it's less transparent as well" next to
-// the newly-more-transparent light mode. Dropped one step, 0x66 -> 0x55
-// (~33% opaque), the same kind of single-variable cut as light mode's,
-// rather than matching the exact percentage-point drop — dark mode's
-// colGray400/colWhite text has more contrast headroom against a near-black
-// background than light mode's colGray600 does against white, so there's
-// less of a legibility cliff to worry about here.
+// REVERTED: 0x99 -> 0x80 (light) and 0x66 -> 0x55 (dark) were both pushed
+// further per explicit user request for more visible glass once light
+// mode's transparency was confirmed working. Real-device testing then
+// showed text noticeably less crisp than the previous build on both
+// themes — the extra transparency traded away more legibility than it was
+// worth. Reverted both back to the values confirmed to read well: 0x99
+// light (paired with acrylic_windows.go's acrylicGradientColorLight fix,
+// which is what actually solved light mode's original "always fully
+// opaque" bug and stays in place) and 0x66 dark (the value already
+// confirmed "perfect"/"crisp" earlier in this file's history). If more
+// transparency is wanted again later, treat it as a fresh single-variable
+// test rather than assuming these same two steps will read differently.
 const (
-	cardBackgroundAlphaLight = 0x80 // ~50% opaque
-	cardBackgroundAlphaDark  = 0x55 // ~33% opaque
+	cardBackgroundAlphaLight = 0x99 // ~60% opaque
+	cardBackgroundAlphaDark  = 0x66 // ~40% opaque
 )
 
 func currentCardBackgroundAlpha() byte {
