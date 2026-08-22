@@ -111,10 +111,12 @@ show tray UI directly.
   so the icon renders crisp — not blurred/upscaled — on scaled displays.
 * **Click** (left or right — both open the same view) shows a status card: a
   BlueSky-styled window (brand blue, rounded corners) rather than a native
-  popup menu, opened centered on screen but freely drag-movable afterward
-  (click anywhere on the card except the close button/action buttons and
-  drag — standard Win32 window-move behavior, not a custom drag
-  implementation). Text renders in the product's actual brand typeface —
+  popup menu, pinned flush to the bottom-right corner of the primary
+  monitor's work area — right above the taskbar — rather than centered on
+  screen. The background is translucent and DWM-blurred (Windows' Acrylic
+  material, matching the macOS menu bar app's vibrancy panel), tuned
+  separately for light and dark Windows themes so text stays legible on
+  both. Text renders in the product's actual brand typeface —
   Outfit, at Regular/SemiBold/Bold weights — via 3 static TTFs embedded
   into the binary and privately registered at runtime with
   `AddFontMemResourceEx` (`tray/fonts.go`; nothing written to disk, nothing
