@@ -91,34 +91,27 @@ import "unsafe"
 // dark enough that colGray400/colWhite text (already chosen for contrast
 // against near-black) keeps working.
 //
-// cardBackgroundAlphaLight tuning history (three real-device rounds so far):
-//   0xE6 (~90%) — the conservative first guess to protect the contrast math
-//     above; confirmed on real hardware, but read as "basically solid," no
-//     visible glass at all. Tested while acrylic_windows.go was still on
-//     plain ACCENT_ENABLE_BLURBEHIND, before the Acrylic swap below.
-//   0xCC (~80%) — after acrylic_windows.go switched to
-//     ACCENT_ENABLE_ACRYLICBLURBEHIND (confirmed looking right on dark
-//     mode), light mode was retested at this lower value. Result: "no
-//     difference," still fully solid, zero trace of the desktop behind the
-//     card. A parallel hypothesis (DWM's blur pipeline needing
-//     DWMWA_USE_IMMERSIVE_DARK_MODE set to know this window isn't
-//     dark-themed) was tested and also came back with zero change — ruled
-//     out, see acrylic_windows.go's FIFTH-ATTEMPT DIAGNOSIS comment.
-//   0x99 (~60%, current) — re-reading those two results together: a
-//     90%->80% cut is a small change off an already-high baseline, easy for
-//     the eye to not register as different even if the blend is technically
-//     working, especially against a smooth wallpaper region — very
-//     different from dark mode's dramatic, unmistakable result at 0x66
-//     (~40% opaque, 60% of the pixel showing blurred desktop). This is a
-//     much bigger, unambiguous single-variable cut, still kept meaningfully
-//     more opaque than dark mode's 0x66 as a safety margin for the
-//     colGray600 contrast-floor concern above. If light mode is STILL fully
-//     solid at 0x99, that argues the earlier "just needs a bigger cut"
-//     theory is also wrong, and the real bug lives elsewhere (e.g.
-//     finalizeAlpha's diff-based background classification failing
-//     specifically in light mode) — worth checking next if so.
+// cardBackgroundAlphaLight tuning history:
+//   0xE6 (~90%) — conservative first guess; "basically solid," no glass.
+//   0xCC (~80%) — retested after the Acrylic swap; still "no difference,"
+//     fully solid. Turned out cardBackgroundAlphaLight was never the actual
+//     blocker at either value — see acrylic_windows.go's SIXTH-ATTEMPT
+//     DIAGNOSIS: the accent policy's gradientColor RGB (pure white)
+//     was tripping the Acrylic material's own automatic luminosity-opacity
+//     clamp, independent of anything set here.
+//   0x99 (~60%) — tested after acrylic_windows.go's gradientColor fix
+//     unlocked real transparency for the first time. Confirmed on real
+//     hardware: text legible, background reads as a clean light tint, and
+//     the desktop is visibly (if subtly) showing through — the target
+//     state, just more conservative than necessary now that transparency
+//     itself is a working, tunable dial rather than an on/off switch.
+//   0x80 (~50%, current) — user explicitly asked for more visible glass
+//     once 0x99 was confirmed legible; this is the next single-variable
+//     step down, still comfortably more opaque than dark mode's 0x66 for
+//     the colGray600 contrast-floor reason above. If text legibility
+//     regresses at this value, step back up toward 0x99.
 const (
-	cardBackgroundAlphaLight = 0x99 // ~60% opaque
+	cardBackgroundAlphaLight = 0x80 // ~50% opaque
 	cardBackgroundAlphaDark  = 0x66 // ~40% opaque
 )
 
