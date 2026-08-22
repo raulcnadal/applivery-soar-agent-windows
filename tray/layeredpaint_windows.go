@@ -65,12 +65,18 @@ import "unsafe"
 // cardBackgroundAlpha is the tint opacity applied to the card's own
 // translucent background fill (0-255) — the RGB itself still comes from
 // cardSurfaceColor (colWhite/colGray900), just not fully opaque, so the DWM
-// blur set up in acrylic_windows.go shows through it. 0xCC (~80%) matches
-// the opacity Windows' own Acrylic material recipe (Fluent Design's
-// AcrylicBackgroundFillColorDefault) uses by default — a starting point,
-// not a value measured against this specific card; adjust after a real
-// visual pass.
-const cardBackgroundAlpha = 0xCC
+// blur set up in acrylic_windows.go shows through it. Lowered from the
+// initial 0xCC (~80%) to 0x66 (~40%) after real-device testing (AMD64 and
+// ARM64, both foreground, no other window in front) showed no visible
+// transparency at all on the card — at 80% opaque, whatever sliver of
+// blur/desktop was showing through may simply have been too faint to read
+// as "translucent" rather than genuinely absent. Still a starting point for
+// the next test pass, not a final tuned value — see acrylic_windows.go's
+// doc comment if this test also shows no visible effect, since that would
+// point at the DWM backdrop calls themselves (or SetWindowRgn's rounded-
+// corner clip interacting with UpdateLayeredWindow's per-pixel alpha)
+// rather than this constant.
+const cardBackgroundAlpha = 0x66
 
 var (
 	procCreateDIBSection    = modgdi32.NewProc("CreateDIBSection")
