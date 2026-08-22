@@ -89,17 +89,28 @@ import "unsafe"
 // text sits on is no longer anything close to white. Dark mode doesn't have
 // the same failure mode: colGray900 blended with almost any wallpaper stays
 // dark enough that colGray400/colWhite text (already chosen for contrast
-// against near-black) keeps working. Light mode instead has to stay close
-// to opaque to preserve the contrast math its text colors were tuned for —
-// a real-device follow-up test still read this as "basically solid,"
-// though, so there's a genuine, unavoidable tension here between "visibly
-// glassy" and "text stays legible on an arbitrary wallpaper" for a light
-// surface specifically; every other real vibrancy implementation (including
-// macOS's own light-material NSVisualEffectView) leans the same direction
-// for the same reason. Not touching this value again without a live test —
-// see this repo's standing "test one variable at a time" practice.
+// against near-black) keeps working.
+//
+// cardBackgroundAlphaLight was set to 0xE6 (~90%) as the conservative first
+// guess to protect that contrast math, and a real-device test at that value
+// confirmed it — but also read as "basically solid," no visible glass at
+// all, right around the same time acrylic_windows.go was still requesting
+// plain ACCENT_ENABLE_BLURBEHIND. Since then that call switched to
+// ACCENT_ENABLE_ACRYLICBLURBEHIND (blur + noise texture, not just a flat
+// blur) and confirmed looking right on dark mode — light mode was never
+// actually retested at a lower alpha *under the new material*, so "90% is
+// necessary" was never really proven, just the first value tried. Lowered
+// to 0xCC (~80%, the same starting point cardBackgroundAlphaDark itself
+// began at before its own tuning) as the next single-variable test — still
+// meaningfully more opaque than dark mode's 0x66 (light surfaces
+// genuinely do need to stay more opaque than dark ones for the reasons
+// above), but enough of a drop from 0xE6 that the Acrylic noise texture
+// might now read as visible "glass" rather than flat, if the contrast math
+// still holds at this level. If text goes illegible again at 0xCC, that
+// would be real evidence of the contrast floor rather than an untested
+// guess — see this repo's standing "test one variable at a time" practice.
 const (
-	cardBackgroundAlphaLight = 0xE6 // ~90% opaque
+	cardBackgroundAlphaLight = 0xCC // ~80% opaque
 	cardBackgroundAlphaDark  = 0x66 // ~40% opaque
 )
 
